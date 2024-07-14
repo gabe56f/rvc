@@ -2,20 +2,20 @@
 *.pt
 *.ckpt
 
-weights
+weights/*
 !weights/.gitkeep
 
 train_logs/*
 wandb/*
 
-vocals
+vocals/*
 !vocals/.gitkeep
 
-accompaniment
+accompaniment/*
 !accompaniment/.gitkeep
 
-output
+output/*
 !output/.gitkeep
 
-models
+models/*
 !models/.gitkeep
