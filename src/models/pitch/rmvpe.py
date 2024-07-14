@@ -1,5 +1,3 @@
-import time
-
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -359,18 +357,13 @@ class MelSpectrogram(torch.nn.Module):
 
 class RMVPE:
     def __init__(self, model_path="rmvpe.pt", device="cuda", dtype=torch.bfloat16):
-        model = E2E(4, 1, (2, 2))
-        ckpt = torch.load(model_path, map_location="cpu")
-        model.load_state_dict(ckpt)
-        self.model = model
+        self.model_path = model_path
+        self.model = None
+        self.mel_extractor = None
         self.device = device
         self.dtype = dtype
-        self.mel_extractor = MelSpectrogram(128, 16000, 1024, 160, None, 30, 8000)
         cents_mapping = 20 * np.arange(360) + 1997.3794084376191
         self.cents_mapping = np.pad(cents_mapping, (4, 4))  # 368
-
-        self.model = self.model.to(device, dtype).eval()
-        self.mel_extractor = self.mel_extractor.to(device, dtype).eval()
 
     def mel2hidden(self, mel: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
@@ -400,29 +393,22 @@ class RMVPE:
     ) -> torch.Tensor:
         thred_def = 0.05
 
-        self.timer("")
+        if self.model is None:
+            ckpt = torch.load(self.model_path, map_location="cpu")
+            self.model = E2E(4, 1, (2, 2))
+            self.model.load_state_dict(ckpt)
+            self.mel_extractor = MelSpectrogram(128, 16000, 1024, 160, None, 30, 8000)
+            self.model = self.model.to(self.device, self.dtype).eval()
+            self.mel_extractor = self.mel_extractor.to(self.device, self.dtype).eval()
+
         audio = x.to(self.device, self.dtype).unsqueeze(0)
-        self.timer("move")
         mel = self.mel_extractor(audio, center=True, dtype=self.dtype)
-        self.timer("mel_extractor")
         hidden = self.mel2hidden(mel)
-        self.timer("mel2hidden")
         hidden = hidden.squeeze(0).cpu().float().numpy()
-        self.timer("squeeze")
         f0 = self.decode(hidden, thred=thred_def).to(self.device, self.dtype)
-        self.timer("decode")
         return f0
 
-    t0 = None
-
-    def timer(self, t=""):
-        return
-        if self.t0 is not None:
-            print(f"{t} {time.time() - self.t0}")
-        self.t0 = time.time()
-
     def to_local_average_cents(self, salience: np.ndarray, thred: float = 0.05):
-        self.timer("tolocalaverge")
         center = np.argmax(salience, axis=1)  # 帧长#index
         salience = np.pad(salience, ((0, 0), (4, 4)))  # 帧长,368
         center += 4
@@ -430,18 +416,14 @@ class RMVPE:
         todo_cents_mapping = []
         starts = center - 4
         ends = center + 5
-        self.timer("argpad")
         for idx in range(salience.shape[0]):
             todo_salience.append(salience[:, starts[idx] : ends[idx]][idx])
             todo_cents_mapping.append(self.cents_mapping[starts[idx] : ends[idx]])
-        self.timer("salience")
         todo_salience = np.array(todo_salience)  # 帧长，9
         todo_cents_mapping = np.array(todo_cents_mapping)  # 帧长，9
         product_sum = np.sum(todo_salience * todo_cents_mapping, 1)
         weight_sum = np.sum(todo_salience, 1)  # 帧长
         devided = product_sum / weight_sum  # 帧长
-        self.timer("stack and sum")
         maxx = np.max(salience, axis=1)  # 帧长
         devided[maxx <= thred] = 0
-        self.timer("max")
         return devided
