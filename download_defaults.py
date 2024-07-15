@@ -25,7 +25,7 @@ if __name__ == "__main__":
     with progress_bar as progress:
         task = progress.add_task("Downloading models", total=total)
         download(
-            "https://huggingface.co/lj1995/VoiceConversionWebUI/resikve/main/hubert_base.pt",
+            "https://huggingface.co/lj1995/VoiceConversionWebUI/resolve/main/hubert_base.pt",
             "hubert_base.pt",
             progress,
         )
