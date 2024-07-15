@@ -19,3 +19,5 @@ output/*
 
 models/*
 !models/.gitkeep
+
+**/__pycache__
