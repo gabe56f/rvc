@@ -1,4 +1,5 @@
 from typing import Tuple, Literal
+import importlib.util
 
 import torch
 import torch.nn.functional as F
@@ -33,6 +34,10 @@ from .data_utils import (
     TextAudioCollateMultiNSFsid,
     DistributedBucketSampler,
 )
+
+
+def is_available(pkg: str) -> bool:
+    return importlib.util.find_spec(pkg) is not None
 
 
 def load_audio(file: str, sr: int) -> Tuple[np.ndarray, int]:

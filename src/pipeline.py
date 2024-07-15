@@ -51,6 +51,7 @@ logger = logging.getLogger(__name__)
 class VocalPipeline:
     loaded_models: Dict[str, Tuple[SynthesizerType, ...]] = {}
     loaded_uvr_models: Dict[str, UVR] = {}
+    df, df_state = None, None
     hubert = None
     rvc_config = None
     mdx = None
@@ -69,6 +70,19 @@ class VocalPipeline:
             self.rvc_config.dtype = dtype
 
         return self
+
+    def _get_df(self):
+        from df import enhance
+
+        config = get_config()
+        if self.df is None:
+            from df import init_df
+
+            self.df, self.df_state, _ = init_df(
+                post_filter=True, log_level="none", log_file=None
+            )
+            self.df.to(config.device)
+        return self.df, self.df_state, enhance
 
     def _get_mdx(self):
         if self.mdx is None:
@@ -284,6 +298,41 @@ class VocalPipeline:
                                 "Illegal state, preprocess_output cannot be file after processing already happened."
                             )
                         audio = audio[next_preprocess].T
+                    elif preprocess.type == "DeepFilterNet":
+                        df, df_state, enhance = self._get_df()
+                        if sr != df_state.sr():
+                            audio = (
+                                Fa.resample(
+                                    torch.from_numpy(audio).to(
+                                        config.device, config.dtype
+                                    ),
+                                    sr,
+                                    df_state.sr(),
+                                )
+                                .cpu()
+                                .float()
+                            )
+                            sr = df_state.sr()
+                            logger.debug(sr)
+                        vocals = enhance(df, df_state, audio)
+                        if preprocess.save_vocals:
+                            vocals_dir = (
+                                Path(preprocess.vocals_directory_override)
+                                or vocals_folder
+                            )
+                            vocals_dir.mkdir(exist_ok=True)
+                            filename = f"vocals_{generation.filename}_{i}.wav"
+                            sf.write(
+                                vocals_dir / filename,
+                                vocals.cpu().float().numpy().T,
+                                sr,
+                            )
+                            outputs.append("http://localhost:8000/vocals/" + filename)
+                        if next_preprocess == "file":
+                            raise ValueError(
+                                "Illegal state, preprocess_output cannot be file after processing already happened."
+                            )
+                        audio: np.ndarray = vocals.cpu().float().numpy()
                     logger.debug(
                         f"audio shape post preprocess {i}-{preprocess.type}: {audio.shape}"
                     )

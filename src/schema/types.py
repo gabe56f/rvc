@@ -1,3 +1,4 @@
+from pathlib import Path
 from typing import List, AsyncGenerator
 import logging
 import os
@@ -8,9 +9,11 @@ import torch
 from .devices import Device
 from .config import Config, ConfigInput
 from .generations import Generation, GenerationInput
+from .generic import Entry
 from .model import Model
 from ..config import get_config
 from ..tagging import get_tags
+from ..utils import is_available
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +40,34 @@ class Query:
         return devices
 
     @field
+    def pitchExtractors(self) -> List[Entry]:
+        out = []
+        if Path("rmvpe.pt").exists():
+            out.append(Entry(label="RMVPE", value="rmvpe"))
+        if is_available("torchfcpe"):
+            out.append(Entry(label="FCPE", value="fcpe"))
+        if is_available("torchcrepe"):
+            out.append(Entry(label="Crepe", value="crepe"))
+        if is_available("pyworld"):
+            out.append(Entry(label="Harvest", value="harvest"))
+            out.append(Entry(label="Dio", value="dio"))
+        if is_available("parselmouth"):
+            out.append(Entry(label="Parselmouth", value="pm"))
+        out.append(Entry(label="Pyin", value="pyin"))
+        return out
+
+    @field
+    def uvrModels(self) -> List[Entry]:
+        out = []
+        for f in os.listdir("./"):
+            if f.endswith(".pth"):
+                out.append(Entry(label=f, value=f))
+        for f in os.listdir("models/"):
+            if f.endswith(".pth"):
+                out.append(Entry(label=f, value=f"models/{f}"))
+        return out
+
+    @field
     def config(self) -> Config:
         config = get_config()
         t = config.device.split(":")
@@ -59,7 +90,7 @@ class Query:
                     label=(x[0].upper() + x[1:]).replace("_", " ").replace("-", " "),
                     value=x,
                 ),
-                os.listdir("models/"),
+                filter(lambda x: (Path("models/") / x).is_dir(), os.listdir("models/")),
             )
         )
 

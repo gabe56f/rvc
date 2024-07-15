@@ -111,3 +111,21 @@ mutation Queue($input: Upload!, $filename: String!, $model: String!, $transpose:
   }
 }
 `;
+
+export const UVR_MODELS = gql`
+query UvrModels {
+  uvrModels {
+    label
+    value
+  }
+}
+`;
+
+export const PITCH_EXTRACTORS = gql`
+query PitchExtractors {
+  pitchExtractors {
+    label
+    value
+  }
+}
+`;

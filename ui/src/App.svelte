@@ -8,14 +8,12 @@
   import Form from "$lib/components/ui/form/form.svelte";
   import Slider from "$lib/components/ui/slider/slider.svelte";
   import type { ButtonEventHandler } from "bits-ui";
-  import {
-    Plus,
-    ChevronsRight,
-    MoveDown,
-    MoveUp,
-    X,
-    CircleAlert,
-  } from "lucide-svelte";
+  import ChevronsRight from "lucide-svelte/icons/chevrons-right";
+  import X from "lucide-svelte/icons/x";
+  import Plus from "lucide-svelte/icons/plus";
+  import MoveDown from "lucide-svelte/icons/move-down";
+  import MoveUp from "lucide-svelte/icons/move-up";
+  import CircleAlert from "lucide-svelte/icons/circle-alert";
   import { Input } from "$lib/components/ui/input";
   import ScrollArea from "$lib/components/ui/scroll-area/scroll-area.svelte";
   import { Toggle } from "$lib/components/ui/toggle";
@@ -25,11 +23,12 @@
   import * as Alert from "$lib/components/ui/alert";
   import { swipe } from "svelte-gestures";
   import { ApolloClient, InMemoryCache, HttpLink } from "@apollo/client/core";
-  import { setClient, query } from "svelte-apollo-updated";
   import {
     PAST_GENERATIONS,
     QUEUE,
     MODELS,
+    PITCH_EXTRACTORS,
+    UVR_MODELS,
     type Generation,
     type Entry,
   } from "./schema";
@@ -45,84 +44,42 @@
     link: httpLink,
     cache: new InMemoryCache(),
   });
-  setClient(client);
 
-  /*function subscribe<TData = unknown, TVariables = unknown>(
-    query: DocumentNode,
-    options: Omit<SubscriptionOptions<TVariables>, "query"> = {},
-  ): ReadableResult<TData> {
-    const observable = client.subscribe<TData, TVariables>({
-      query,
-      ...options,
-    });
-
-    return observableToReadable<TData>(observable);
-  }*/
-
-  let pastGenerationsQuery = query(PAST_GENERATIONS, {
-    variables: { count: 10 },
-  });
-  let modelsQuery = query(MODELS);
+  let dragndrop: HTMLElement;
 
   let files: any[] = [];
   let fileContent: string;
 
-  let pitchExtractors = [
-    {
-      label: "RMVPE",
-      value: "rmvpe",
-    },
-    {
-      label: "FCPE",
-      value: "fcpe",
-    },
-    {
-      label: "Crepe",
-      value: "crepe",
-    },
-    {
-      label: "Harvest",
-      value: "harvest",
-    },
-    {
-      label: "Dio",
-      value: "dio",
-    },
-    {
-      label: "Parselmouth",
-      value: "pm",
-    },
-  ];
+  let pitchExtractors: Entry[] = [];
   let models: Entry[] = [];
-  let uvrModels = [
-    {
-      label: "VR-DeEchoNormal.pth",
-      value: "VR-DeEchoNormal.pth",
-    },
-  ];
+  let uvrModels: Entry[] = [];
+
   let chosenExtractor = [""];
   let chosenModel = [""];
   let transpose: number[] = [0];
   let preprocessOutput = ["file"];
+
   let preprocess: any[] = [];
-  let sidebarOpen = false;
   let alertstuff: string[] = [];
+
+  let sidebarOpen = false;
   let swipeTime = Date.now();
+
   let pastGenerations: Generation[] = [];
 
-  let dragndrop: HTMLElement;
-
-  const preprocessInputs = [{ label: "File", value: "file" }];
-  const _preprocessInputs = [
-    {
-      label: "Accompaniment",
-      value: "accompaniment",
-    },
-    {
-      label: "Vocal",
-      value: "vocals",
-    },
-  ];
+  const preprocessInputs = {
+    true: [{ label: "File", value: "file" }],
+    false: [
+      {
+        label: "Accompaniment",
+        value: "accompaniment",
+      },
+      {
+        label: "Vocal",
+        value: "vocals",
+      },
+    ],
+  };
 
   const separators = [
     {
@@ -132,6 +89,10 @@
     {
       label: "UVR",
       value: "UVR",
+    },
+    {
+      label: "DeepFilterNet",
+      value: "DeepFilterNet",
     },
   ];
 
@@ -317,32 +278,25 @@
   };
 
   const refresh = () => {
-    pastGenerationsQuery.refetch({ count: 10 });
-    modelsQuery.refetch();
-    console.log("ref");
-    pastGenerationsQuery.result().then((value) => {
-      const pastLength = pastGenerations.length;
-      pastGenerations = value.data.pastGenerations;
-      const newLength = pastGenerations.length;
-
-      if (pastLength != newLength) {
-        for (const p in revealed) {
-          const past = p - 1;
-          if (past < 0) {
-            revealed.splice(revealed.indexOf(past), 1);
-            continue;
-          }
-          const gen = pastGenerations[newLength - past];
-          setAudio(gen);
-        }
-      }
-    });
-    modelsQuery.result().then((value) => {
+    client
+      .query({ query: PAST_GENERATIONS, variables: { count: 10 } })
+      .then((value) => {
+        pastGenerations = value.data.pastGenerations;
+      });
+    client.query({ query: MODELS }).then((value) => {
       models = value.data.models;
+    });
+    client.query({ query: UVR_MODELS }).then((value) => {
+      uvrModels = value.data.uvrModels;
     });
   };
 
   onMount(() => {
+    // Pitch extractors won't update with the exception of RMVPE, but who cares...
+    client.query({ query: PITCH_EXTRACTORS }).then((value) => {
+      if (!value.loading) pitchExtractors = value.data.pitchExtractors;
+    });
+
     dragndrop = document.querySelector("#dragndrop") as HTMLElement;
     refresh();
   });
@@ -546,7 +500,9 @@
           </p>
         </div>
         <div slot="hover">
-          <h4 class="text-sm font-semibold">Transpose</h4>
+          <h4 class="text-lg font-semibold drop-shadow-md text-slate-600">
+            Transpose
+          </h4>
           <p class="text-sm inline">
             How much to offset the detected pitch by. <code
               class="relative rounded bg-muted px-[0.3rem] py-[0.2rem] font-mono text-sm"
@@ -592,8 +548,8 @@
                   class="inline-flex flex-row align-center justify-center h-[40px] gap-2"
                 >
                   <Combobox
-                    cclass="max-w-48"
-                    values={i == 0 ? preprocessInputs : _preprocessInputs}
+                    cclass="max-w-64"
+                    values={preprocessInputs[i == 0]}
                     placeholder="Select an input..."
                     bind:chosen={preprocessentry.input}
                   />
@@ -664,7 +620,6 @@
                             placeholder="Select a model..."
                             bind:chosen={preprocessentry.model}
                           />
-                          <!--<Input bind:value={preprocessentry.model} />-->
                         </div>
                       </Form>
                     </div>
@@ -705,18 +660,22 @@
                     <Input bind:value={preprocessentry.vocalLocation} />
                   {/if}
                 </div>
-                <div class="inline-flex w-full px-4 py-2 gap-2">
-                  <Toggle
-                    variant="outline"
-                    aria-label="Toggle accompaniment"
-                    bind:pressed={preprocessentry.saveAccompaniment}
-                    >Save accompaniment</Toggle
-                  >
-                  {#if preprocessentry.saveAccompaniment}
-                    <p class="text-sm">Save location:</p>
-                    <Input bind:value={preprocessentry.accompanimentLocation} />
-                  {/if}
-                </div>
+                {#if preprocessentry.type != "DeepFilterNet"}
+                  <div class="inline-flex w-full px-4 py-2 gap-2">
+                    <Toggle
+                      variant="outline"
+                      aria-label="Toggle accompaniment"
+                      bind:pressed={preprocessentry.saveAccompaniment}
+                      >Save accompaniment</Toggle
+                    >
+                    {#if preprocessentry.saveAccompaniment}
+                      <p class="text-sm">Save location:</p>
+                      <Input
+                        bind:value={preprocessentry.accompanimentLocation}
+                      />
+                    {/if}
+                  </div>
+                {/if}
               </div>
             {/each}
           </div>

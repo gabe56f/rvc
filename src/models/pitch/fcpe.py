@@ -1,5 +1,4 @@
 import torch
-import torchfcpe
 
 
 class FCPE:
@@ -21,6 +20,8 @@ class FCPE:
         variant: str = "full",
     ) -> torch.Tensor:
         if self.fcpe is None:
+            import torchfcpe
+
             self.fcpe = torchfcpe.spawn_bundled_infer_model(self.device).to(self.dtype)
         with torch.autocast(torch.device(self.device).type, self.dtype):
             x = x.clamp(-1, 1).unsqueeze(0)
