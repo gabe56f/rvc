@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional
 from pathlib import Path
 
 import torch
@@ -12,8 +12,8 @@ from faiss import Index
 from .models import (
     SynthesizerTrnMs256NSFsid,
     SynthesizerTrnMs768NSFsid,
-    MultiPeriodDiscriminator,
-    MultiPeriodDiscriminatorV2,
+    MultiPeriodDiscriminator,  # noqa
+    MultiPeriodDiscriminatorV2,  # noqa
 )
 
 SynthesizerType = Union[
@@ -65,11 +65,9 @@ def _change_rms(
 
 
 def load_rvc_model(
-    file: str, index: str, rvc_config: RVCConfig = RVCConfig()
+    file: Path, index_file: Optional[Path], rvc_config: RVCConfig = RVCConfig()
 ) -> Tuple[SynthesizerType, Index, float, str, int, RVCConfig]:
     """Returns: (net_g, version, target_sr)"""
-    index_file: Path = Path(index)
-    file: Path = Path(file)
     if file.suffix == ".pth":
         ckpt = torch.load(file, map_location=rvc_config.device)
     else:
@@ -77,7 +75,7 @@ def load_rvc_model(
     target_sr = ckpt["config"][-1]
     try:
         ckpt["config"][-3] = ckpt["weight"]["emb_g.weight"].shape[0]  # n_spk
-    except:
+    except:  # noqa
         pass
     f0 = ckpt.get("f0", 1)
     if f0 == 0:
@@ -94,8 +92,12 @@ def load_rvc_model(
     net_g.eval()
     net_g = net_g.to(rvc_config.device, rvc_config.dtype)
 
-    index: Index = faiss.read_index(str(index_file))
-    big_npy: float = index.reconstruct_n(0, index.ntotal)
+    if index_file is None:
+        index = None
+        big_npy = None
+    else:
+        index: Index = faiss.read_index(index_file.as_posix())
+        big_npy: float = index.reconstruct_n(0, index.ntotal)
 
     return net_g, index, big_npy, version, target_sr, rvc_config
 

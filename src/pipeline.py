@@ -20,7 +20,7 @@ from .models.rvc import load_rvc_model, SynthesizerType, infer, RVCConfig
 from .models.pitch import compute_pitch_from_audio
 from .logger import progress_bar
 from .tagging import write_tags_to_flac
-from .utils import load_audio
+from .utils import load_audio, find_models
 
 if TYPE_CHECKING:
     from faiss import Index
@@ -132,9 +132,10 @@ class VocalPipeline:
             self.rvc_config.batch_size = config.batch_size
 
         folder = base_folder / model_name
+        model_file, index_file = find_models(folder)
         t0 = time()
         model, index, big_npy, version, target_sr, self.rvc_config = load_rvc_model(
-            folder / "checkpoint.pth", folder / "checkpoint.index", self.rvc_config
+            model_file, index_file, self.rvc_config
         )
         self.loaded_models[model_name] = (model, index, big_npy, version, target_sr)
         logger.debug(f"{model_name} loaded in {(time() - t0):3.0f} seconds.")
@@ -412,6 +413,7 @@ class VocalPipeline:
                     target_sr,
                     rms_mix_rate=generation.rms_mix_rate,
                     version=version,
+                    index_rate=generation.index_rate,
                 )
             except:  # noqa
                 (pitch, pitchf), audio = f0_output
@@ -427,6 +429,7 @@ class VocalPipeline:
                     target_sr,
                     rms_mix_rate=generation.rms_mix_rate,
                     version=version,
+                    index_rate=generation.index_rate,
                 )
 
             sf.write(

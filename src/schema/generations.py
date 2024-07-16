@@ -48,6 +48,7 @@ class GenerationInput:
     model: str
     transpose: int
     pitch_extraction: str
+    index_rate: float = 1.0
     rms_mix_rate: float = 1
     preprocess: List[Preprocess]
     preprocess_output: str = field(

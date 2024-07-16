@@ -13,7 +13,7 @@ from .generic import Entry
 from .model import Model
 from ..config import get_config
 from ..tagging import get_tags
-from ..utils import is_available
+from ..utils import is_available, is_valid_model
 
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,9 @@ class Query:
                     label=(x[0].upper() + x[1:]).replace("_", " ").replace("-", " "),
                     value=x,
                 ),
-                filter(lambda x: (Path("models/") / x).is_dir(), os.listdir("models/")),
+                filter(
+                    lambda x: is_valid_model(Path("models/") / x), os.listdir("models/")
+                ),
             )
         )
 

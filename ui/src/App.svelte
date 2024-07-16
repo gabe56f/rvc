@@ -53,10 +53,12 @@
   let pitchExtractors: Entry[] = [];
   let models: Entry[] = [];
   let uvrModels: Entry[] = [];
+  let pastGenerations: Generation[] = [];
 
   let chosenExtractor = [""];
   let chosenModel = [""];
   let transpose: number[] = [0];
+  let indexRate: number[] = [1.0];
   let preprocessOutput = ["file"];
 
   let preprocess: any[] = [];
@@ -64,8 +66,6 @@
 
   let sidebarOpen = false;
   let swipeTime = Date.now();
-
-  let pastGenerations: Generation[] = [];
 
   const preprocessInputs = {
     true: [{ label: "File", value: "file" }],
@@ -205,6 +205,7 @@
               filename: filename,
               model: chosenModel[0],
               transpose: transpose[0],
+              index: indexRate[0],
               pitchExtraction: chosenExtractor.join(","),
               output: preprocessOutput[0],
               preprocess: preproc,
@@ -279,16 +280,22 @@
 
   const refresh = () => {
     client
-      .query({ query: PAST_GENERATIONS, variables: { count: 10 } })
+      .query({
+        query: PAST_GENERATIONS,
+        variables: { count: 10 },
+        fetchPolicy: "no-cache",
+      })
       .then((value) => {
         pastGenerations = value.data.pastGenerations;
       });
-    client.query({ query: MODELS }).then((value) => {
+    client.query({ query: MODELS, fetchPolicy: "no-cache" }).then((value) => {
       models = value.data.models;
     });
-    client.query({ query: UVR_MODELS }).then((value) => {
-      uvrModels = value.data.uvrModels;
-    });
+    client
+      .query({ query: UVR_MODELS, fetchPolicy: "no-cache" })
+      .then((value) => {
+        uvrModels = value.data.uvrModels;
+      });
   };
 
   onMount(() => {
@@ -513,6 +520,27 @@
               class="relative rounded bg-muted px-[0.3rem] py-[0.2rem] font-mono text-sm"
               >+12</code
             > is up one.
+          </p>
+        </div>
+      </Form>
+
+      <Form label="Index rate">
+        <div slot="main" class="flex gap-3 h-auto align-center">
+          <p class="text-xs font-mono">0</p>
+          <Slider min={0} max={1} step={0.1} bind:value={indexRate} />
+          <p class="text-xs font-mono">1</p>
+          <p />
+          <p class="text-xn font-mono bg-muted rounded px-[0.3rem] py-[0.2rem]">
+            {indexRate}
+          </p>
+        </div>
+        <div slot="hover">
+          <h4 class="text-lg font-semibold drop-shadow-md text-slate-600">
+            Index rate
+          </h4>
+          <p class="text-sm inline">
+            A higher index rate <i>(in the presence of an index file)</i> will usually
+            result in more accurate accent reproduction.
           </p>
         </div>
       </Form>

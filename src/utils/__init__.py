@@ -35,6 +35,8 @@ from .data_utils import (
     DistributedBucketSampler,
 )
 
+from .file_utils import is_valid_model, find_models
+
 
 def is_available(pkg: str) -> bool:
     return importlib.util.find_spec(pkg) is not None

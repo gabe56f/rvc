@@ -70,7 +70,7 @@ query Devices {
 `;
 
 export const QUEUE_SUB = gql`
-subscription Queue($input: Upload!, $filename: String, $model: String, $transpose: Int, $pitchExtraction: String, $output: String, $preprocess: [Preprocess!]) {
+subscription Queue($input: Upload!, $filename: String!, $model: String!, $transpose: Int!, $index: Float!, $pitchExtraction: String!, $output: String!, $preprocess: [Preprocess!]!) {
   createAndAwaitResult(
     input: {
       filename: $filename
@@ -78,6 +78,7 @@ subscription Queue($input: Upload!, $filename: String, $model: String, $transpos
       input: $input
       model: $model
       transpose: $transpose
+      indexRate: $index
       pitchExtraction: $pitchExtraction
       preprocessOutput: $output
       preprocess: $preprocess
@@ -94,7 +95,7 @@ subscription Queue($input: Upload!, $filename: String, $model: String, $transpos
 `;
 
 export const QUEUE = gql`
-mutation Queue($input: Upload!, $filename: String!, $model: String!, $transpose: Int!, $pitchExtraction: String!, $output: String!, $preprocess: [Preprocess!]!) {
+mutation Queue($input: Upload!, $filename: String!, $model: String!, $transpose: Int!, $index: Float!, $pitchExtraction: String!, $output: String!, $preprocess: [Preprocess!]!) {
   createAndAwaitResult(
     input: {
       filename: $filename
@@ -102,6 +103,7 @@ mutation Queue($input: Upload!, $filename: String!, $model: String!, $transpose:
       input: $input
       model: $model
       transpose: $transpose
+      indexRate: $index
       pitchExtraction: $pitchExtraction
       preprocessOutput: $output
       preprocess: $preprocess
