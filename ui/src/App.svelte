@@ -60,8 +60,8 @@
   let transpose: number[] = [0];
   let indexRate: number[] = [1.0];
   let preprocessOutput = ["file"];
-
   let preprocess: any[] = [];
+
   let alertstuff: string[] = [];
 
   let sidebarOpen = false;
@@ -181,6 +181,8 @@
       alertstuff.push("Process input isn't set.");
 
     if (alertstuff.length == 0) {
+      save();
+
       let preproc = [];
       for (const i in Object.keys(preprocess)) {
         const value = preprocess[i];
@@ -298,6 +300,26 @@
       });
   };
 
+  const save = () => {
+    localStorage.setItem("extractor", JSON.stringify(chosenExtractor));
+    localStorage.setItem("model", JSON.stringify(chosenModel));
+    localStorage.setItem("transpose", JSON.stringify(transpose));
+    localStorage.setItem("indexRate", JSON.stringify(indexRate));
+    localStorage.setItem("preprocessOutput", JSON.stringify(preprocessOutput));
+    localStorage.setItem("preprocess", JSON.stringify(preprocess));
+  };
+
+  const load = () => {
+    chosenExtractor = JSON.parse(localStorage.getItem("extractor") || "[]");
+    chosenModel = JSON.parse(localStorage.getItem("model") || "[]");
+    transpose = JSON.parse(localStorage.getItem("transpose") || "[0]");
+    indexRate = JSON.parse(localStorage.getItem("indexRate") || "[1.0]");
+    preprocessOutput = JSON.parse(
+      localStorage.getItem("preprocessOutput") || "[]"
+    );
+    preprocess = JSON.parse(localStorage.getItem("preprocess") || "[]");
+  };
+
   onMount(() => {
     // Pitch extractors won't update with the exception of RMVPE, but who cares...
     client.query({ query: PITCH_EXTRACTORS }).then((value) => {
@@ -306,6 +328,7 @@
 
     dragndrop = document.querySelector("#dragndrop") as HTMLElement;
     refresh();
+    load();
   });
 </script>
 
