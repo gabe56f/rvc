@@ -5,7 +5,6 @@ from torch import nn
 import torch.nn.functional as F
 from torch.nn import Conv1d, ConvTranspose1d, Conv2d
 from torch.nn.utils import weight_norm, remove_weight_norm, spectral_norm
-import numpy as np
 
 from . import attentions, modules, commons
 
@@ -318,7 +317,8 @@ class SineGen(torch.nn.Module):
             f0_buf = torch.zeros(f0.shape[0], f0.shape[1], self.dim, device=f0.device)
             # fundamental component
             f0_buf[:, :, 0] = f0[:, :, 0]
-            for idx in np.arange(self.harmonic_num):
+            for idx in torch.arange(self.harmonic_num):
+                idx = idx.item()
                 f0_buf[:, :, idx + 1] = f0_buf[:, :, 0] * (
                     idx + 2
                 )  # idx + 2: the (idx+1)-th overtone, (idx+2)-th harmonic
@@ -350,7 +350,7 @@ class SineGen(torch.nn.Module):
             cumsum_shift = torch.zeros_like(rad_values)
             cumsum_shift[:, 1:, :] = tmp_over_one_idx * -1.0
             sine_waves = torch.sin(
-                torch.cumsum(rad_values + cumsum_shift, dim=1) * 2 * np.pi
+                torch.cumsum(rad_values + cumsum_shift, dim=1) * 2 * torch.pi
             )
             sine_waves = sine_waves * self.sine_amp
             uv = self._f02uv(f0)
@@ -427,7 +427,9 @@ class GeneratorNSF(torch.nn.Module):
         self.num_kernels = len(resblock_kernel_sizes)
         self.num_upsamples = len(upsample_rates)
 
-        self.f0_upsamp = torch.nn.Upsample(scale_factor=np.prod(upsample_rates))
+        self.f0_upsamp = torch.nn.Upsample(
+            scale_factor=torch.prod(torch.tensor(upsample_rates)).item()
+        )
         self.m_source = SourceModuleHnNSF(sampling_rate=sr, harmonic_num=0)
         self.noise_convs = nn.ModuleList()
         self.conv_pre = Conv1d(
@@ -450,7 +452,7 @@ class GeneratorNSF(torch.nn.Module):
                 )
             )
             if i + 1 < len(upsample_rates):
-                stride_f0 = np.prod(upsample_rates[i + 1 :])
+                stride_f0 = torch.prod(torch.tensor(upsample_rates[i + 1 :])).item()
                 self.noise_convs.append(
                     Conv1d(
                         1,
@@ -477,7 +479,7 @@ class GeneratorNSF(torch.nn.Module):
         if gin_channels != 0:
             self.cond = nn.Conv1d(gin_channels, upsample_initial_channel, 1)
 
-        self.upp = np.prod(upsample_rates)
+        self.upp = torch.prod(torch.tensor(upsample_rates)).item()
 
     def forward(self, x, f0, g=None):
         har_source, noi_source, uv = self.m_source(f0, self.upp)

@@ -10,6 +10,7 @@ from .crepe import Crepe
 from .dio import Dio
 from .fcpe import FCPE
 from .harvest import Harvest
+from .melodia import Melodia
 from .pm import Parselmouth
 from .pyin import Pyin
 from .rmvpe import RMVPE
@@ -38,6 +39,7 @@ def _get_pitch_extractors(rvc_config: "RVCConfig"):
             "dio": Dio(**kwargs),
             "pyin": Pyin(**kwargs),
             "parselmouth": Parselmouth(**kwargs),
+            "melodia": Melodia(**kwargs),
         }
     return _pitch_extractors
 
@@ -107,6 +109,8 @@ def compute_pitch_from_audio(
     else:
         f0: torch.Tensor = torch.nanmedian(torch.stack(pitches), dim=0).values
     f0 *= pow(2, transposition / 12.0)  # 12 keys
+
+    print(f"Pitch shape: {f0.shape}")
 
     pitchf = f0.clone().to(rvc_config.device, rvc_config.dtype)
     f0_mel = 1127 * torch.log(1 + f0 / 700)

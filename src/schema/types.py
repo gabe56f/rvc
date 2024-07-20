@@ -48,6 +48,8 @@ class Query:
             out.append(Entry(label="FCPE", value="fcpe"))
         if is_available("torchcrepe"):
             out.append(Entry(label="Crepe", value="crepe"))
+        if is_available("essentia"):
+            out.append(Entry(label="Melodia", value="melodia"))
         if is_available("pyworld"):
             out.append(Entry(label="Harvest", value="harvest"))
             out.append(Entry(label="Dio", value="dio"))

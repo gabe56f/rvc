@@ -5,10 +5,8 @@ import torch
 import numpy as np
 import librosa
 
-# from ..utils import OPT_DTYPE
 
-
-OPT_BATCH_SIZE = 4
+OPT_BATCH_SIZE = 1
 
 
 @dataclass
@@ -311,11 +309,11 @@ class Network(torch.nn.Module):
                     batch_data = []
                     batch_locations = []
             estimated_sources = result / counter
-            estimated_sources = estimated_sources.cpu().float().numpy()
-            np.nan_to_num(estimated_sources, copy=False, nan=0.0)
+            torch.nan_to_num(estimated_sources)
 
             if length_init > 2 * border and (border > 0):
                 estimated_sources = estimated_sources[..., border:-border]
+        estimated_sources = estimated_sources.cpu().float().numpy()
         return sr, {
             "vocals": estimated_sources[0],
             "accompaniment": estimated_sources[1],
@@ -340,9 +338,38 @@ class Network(torch.nn.Module):
         x = x * first_conv_out  # reduce artifacts
         x = self.final_conv(torch.cat([mix, x], 1))
         x = self.cws2cac(x)
-
         b, _, f, t = x.shape
         x = x.reshape(b, self.num_target_instruments, -1, f, t)
 
         x = self.stft.inverse(x)
         return x
+
+
+def test(batch: int = 4):
+    from time import time
+
+    from soundfile import write
+
+    from . import load_mdx23c
+    from ...config import get_config
+    from ...utils import load_audio
+
+    global OPT_BATCH_SIZE
+    OPT_BATCH_SIZE = batch
+
+    config = get_config()
+
+    mdx = load_mdx23c("mdx23c.ckpt", STFTConfig(), config.device, config.dtype)
+    w, sr = load_audio("test.mp4", 44100)
+    if len(w.shape) == 1:
+        w = np.asfortranarray([w, w])
+    t0 = time()
+    sr, out = mdx(w)
+    print(f"Time: {time() - t0}")
+
+    write("test_vocal.wav", out["vocals"].T, 44100, "FLOAT")
+    write("test_accom.wav", out["accompaniment"].T, 44100, "FLOAT")
+
+
+if __name__ == "__main__":
+    test()

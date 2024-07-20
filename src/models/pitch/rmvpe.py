@@ -1,8 +1,8 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-import numpy as np
 from librosa.filters import mel
+import numpy as np
 
 
 class BiGRU(nn.Module):
@@ -326,9 +326,11 @@ class MelSpectrogram(torch.nn.Module):
         dtype: torch.dtype = torch.float32,
     ):
         factor = 2 ** (keyshift / 12)
-        n_fft_new = int(np.round(self.n_fft * factor))
-        win_length_new = int(np.round(self.win_length * factor))
-        hop_length_new = int(np.round(self.hop_length * speed))
+        n_fft_new = torch.round(torch.tensor(self.n_fft * factor)).int().item()
+        win_length_new = (
+            torch.round(torch.tensor(self.win_length * factor)).int().item()
+        )
+        hop_length_new = torch.round(torch.tensor(self.hop_length * speed)).int().item()
         keyshift_key = str(keyshift) + "_" + str(audio.device)
         if keyshift_key not in self.hann_window:
             self.hann_window[keyshift_key] = torch.hann_window(win_length_new).to(

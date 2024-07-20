@@ -99,6 +99,9 @@ def load_rvc_model(
         index: Index = faiss.read_index(index_file.as_posix())
         big_npy: float = index.reconstruct_n(0, index.ntotal)
 
+    # TODO: torch.compile ready!! -- expose in config.py
+    # net_g = torch.compile(net_g, fullgraph=True, dynamic=True, mode="max-autotune")
+
     return net_g, index, big_npy, version, target_sr, rvc_config
 
 

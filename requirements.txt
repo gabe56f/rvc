@@ -18,3 +18,4 @@ ffmpeg-python==0.2.0
 fastapi==0.108.0
 came-pytorch==0.1.3
 py-cpuinfo==9.0.0
+essentia==2.1b6.dev1110
