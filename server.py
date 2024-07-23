@@ -1,3 +1,4 @@
+import logging
 from warnings import filterwarnings
 
 import strawberry
@@ -8,7 +9,6 @@ from strawberry.file_uploads import Upload
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
 import uvicorn
 
 from src.schema.types import Query, Mutations, Subscriptions
@@ -44,4 +44,5 @@ app.mount("/", StaticFiles(directory="ui/dist", html=True), name="static")
 
 
 if __name__ == "__main__":
+    logging.getLogger("uvicorn.asgi").setLevel("DEBUG")
     uvicorn.run(app, host="0.0.0.0", port=8000)

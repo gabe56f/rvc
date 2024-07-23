@@ -110,7 +110,7 @@ def compute_pitch_from_audio(
         f0: torch.Tensor = torch.nanmedian(torch.stack(pitches), dim=0).values
     f0 *= pow(2, transposition / 12.0)  # 12 keys
 
-    print(f"Pitch shape: {f0.shape}")
+    # print(f"Pitch shape: {f0.shape}")
 
     pitchf = f0.clone().to(rvc_config.device, rvc_config.dtype)
     f0_mel = 1127 * torch.log(1 + f0 / 700)
@@ -121,3 +121,27 @@ def compute_pitch_from_audio(
     f0_mel[f0_mel > 255] = 255
     pitch = torch.round(f0_mel).to(torch.long)
     return ((pitch.unsqueeze(0), pitchf.unsqueeze(0)), audio_out)
+
+
+def main():
+    from time import time
+    from ...utils import load_audio
+
+    wav, _ = load_audio("test.mp4", 16000)
+
+    t0 = time()
+    compute_pitch_from_audio(wav, extractors="rmvpe")
+    print(f"Init time: {time() - t0}s")
+
+    t = []
+
+    for _ in range(10):
+        t0 = time()
+        compute_pitch_from_audio(wav, extractors="rmvpe")
+        t.append(time() - t0)
+
+    print(f"Time: {np.mean(t)}s")
+
+
+if __name__ == "__main__":
+    main()

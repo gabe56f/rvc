@@ -265,18 +265,12 @@ class E2E(nn.Module):
             en_out_channels,
         )
         self.cnn = nn.Conv2d(en_out_channels, 3, (3, 3), padding=(1, 1))
-        if n_gru:
-            self.fc = nn.Sequential(
-                BiGRU(3 * 128, 256, n_gru),
-                nn.Linear(512, 360),
-                nn.Dropout(0.25),
-                nn.Sigmoid(),
-            )
-        else:
-            raise ValueError("n_gru must be provided")
-            # self.fc = nn.Sequential(
-            #     nn.Linear(3 * N_MELS, N_CLASS), nn.Dropout(0.25), nn.Sigmoid()
-            # )
+        self.fc = nn.Sequential(
+            BiGRU(3 * 128, 256, n_gru),
+            nn.Linear(512, 360),
+            nn.Dropout(0.25),
+            nn.Sigmoid(),
+        )
 
     def forward(self, mel: torch.Tensor):
         mel = mel.transpose(-1, -2).unsqueeze(1)
@@ -367,14 +361,70 @@ class RMVPE:
         cents_mapping = 20 * np.arange(360) + 1997.3794084376191
         self.cents_mapping = np.pad(cents_mapping, (4, 4))  # 368
 
-    def mel2hidden(self, mel: torch.Tensor) -> torch.Tensor:
+    def mel2hidden(
+        self, mel: torch.Tensor, batch_size: int = 1, batch_pad: int = 2048
+    ) -> torch.Tensor:
         with torch.no_grad():
-            n_frames = mel.shape[-1]
-            mel = F.pad(
-                mel, (0, 32 * ((n_frames - 1) // 32 + 1) - n_frames), mode="reflect"
-            )
-            hidden = self.model(mel)
-            return hidden[:, :n_frames]
+            out_size = mel.shape[-1]
+
+            if batch_size != 1:
+                # Pad mel to be divisible by x
+                pad = (batch_size - (out_size % batch_size)) % batch_size
+                mel = F.pad(mel, (0, pad), mode="constant", value=0)
+
+                # Create overlapping segments
+                slice_size = mel.shape[-1] // batch_size
+                out = torch.zeros(
+                    (batch_size, mel.shape[1], slice_size + (batch_pad * 2)),
+                    device=mel.device,
+                    dtype=mel.dtype,
+                )
+
+                for i in range(batch_size):
+                    sl = slice_size * i
+                    start = max(0, sl - batch_pad)
+                    end = min(sl + slice_size + batch_pad, mel.shape[-1])
+                    out[i, :, :] = F.pad(
+                        mel[:, :, start:end],
+                        (
+                            max(batch_pad - sl, 0),
+                            max(0, sl + slice_size + batch_pad - mel.shape[-1]),
+                        ),
+                        mode="reflect",
+                    )
+
+                mel = out
+
+                # Further padding for the model
+                mel = F.pad(
+                    mel,
+                    (0, 32 * ((mel.shape[-1] - 1) // 32 + 1) - mel.shape[-1]),
+                    mode="reflect",
+                )
+
+                # Model inference
+                hidden = self.model(mel)
+
+                # Combine hidden representations, removing overlap
+                out = torch.zeros(
+                    (1, hidden.shape[1] * batch_size, hidden.shape[2]),
+                    device=hidden.device,
+                    dtype=hidden.dtype,
+                )
+                slice_size = hidden.shape[1] - (batch_pad * 2)
+                for i in range(batch_size):
+                    sl = slice_size * i
+                    out[:, sl : sl + slice_size, :] = hidden[
+                        i, batch_pad:-batch_pad, :
+                    ]
+            else:
+                mel = F.pad(
+                    mel,
+                    (0, 32 * ((mel.shape[-1] - 1) // 32 + 1) - mel.shape[-1]),
+                    mode="reflect",
+                )
+                out = self.model(mel)
+            return out[:, :out_size]
 
     def decode(self, hidden: np.ndarray, thred: float = 0.03) -> torch.Tensor:
         cents_pred = self.to_local_average_cents(hidden, thred=thred)
