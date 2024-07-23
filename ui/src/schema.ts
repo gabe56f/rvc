@@ -50,8 +50,6 @@ const example_preprocess = {
     file: "VR-DeEchoNormal.pth",
     saveAccompaniment: true,
     saveVocals: true,
-    accompanimentDirectoryOverride: null,
-    vocalsDirectoryOverride: null,
 }
 
 export type Preprocess = typeof example_preprocess;

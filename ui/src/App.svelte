@@ -184,8 +184,6 @@
           file: value.model[0],
           saveAccompaniment: value.saveAccompaniment,
           saveVocals: value.saveVocals,
-          accompanimentDirectoryOverride: value.accompanimentLocation[0],
-          vocalsDirectoryOverride: value.vocalLocation[0],
         });
       }
 
@@ -575,8 +573,6 @@
                   model: [""],
                   saveVocals: false,
                   saveAccompaniment: false,
-                  accompanimentLocation: ["accompaniment/"],
-                  vocalLocation: ["vocals/"],
                 });
                 preprocess = preprocess;
               }}><Plus /></Button
@@ -669,10 +665,6 @@
                     bind:pressed={preprocessentry.saveVocals}
                     >Save vocals</Toggle
                   >
-                  {#if preprocessentry.saveVocals}
-                    <p class="text-sm">Save location:</p>
-                    <Input bind:value={preprocessentry.vocalLocation} />
-                  {/if}
                 </div>
                 {#if preprocessentry.type != "DeepFilterNet"}
                   <div class="inline-flex w-full px-4 py-2 gap-2">
@@ -682,12 +674,6 @@
                       bind:pressed={preprocessentry.saveAccompaniment}
                       >Save accompaniment</Toggle
                     >
-                    {#if preprocessentry.saveAccompaniment}
-                      <p class="text-sm">Save location:</p>
-                      <Input
-                        bind:value={preprocessentry.accompanimentLocation}
-                      />
-                    {/if}
                   </div>
                 {/if}
               </div>

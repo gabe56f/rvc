@@ -211,14 +211,9 @@ class VocalPipeline:
                         vocals = audio["vocals"]
                         accompaniment = audio["accompaniment"]
                         if preprocess.save_accompaniment:
-                            accompaniment_dir = (
-                                Path(preprocess.accompaniment_directory_override)
-                                or accompaniment_folder
-                            )
-                            accompaniment_dir.mkdir(exist_ok=True)
                             filename = f"accompaniment_{generation.filename}_{i}.wav"
                             sf.write(
-                                accompaniment_dir / filename,
+                                accompaniment_folder / filename,
                                 accompaniment.T,
                                 sr,
                                 "FLOAT",
@@ -228,14 +223,9 @@ class VocalPipeline:
                             )
 
                         if preprocess.save_vocals:
-                            vocals_dir = (
-                                Path(preprocess.vocals_directory_override)
-                                or vocals_folder
-                            )
-                            vocals_dir.mkdir(exist_ok=True)
                             filename = f"vocals_{generation.filename}_{i}.wav"
                             sf.write(
-                                vocals_dir / filename,
+                                vocals_folder / filename,
                                 vocals.T,
                                 sr,
                                 "FLOAT",
@@ -266,14 +256,9 @@ class VocalPipeline:
                         vocals = audio["vocals"]
                         accompaniment = audio["accompaniment"]
                         if preprocess.save_accompaniment:
-                            accompaniment_dir = (
-                                Path(preprocess.accompaniment_directory_override)
-                                or accompaniment_folder
-                            )
-                            accompaniment_dir.mkdir(exist_ok=True)
                             filename = f"accompaniment_{generation.filename}_{i}.wav"
                             sf.write(
-                                accompaniment_dir / filename,
+                                accompaniment_folder / filename,
                                 accompaniment,
                                 sr,
                             )
@@ -282,14 +267,9 @@ class VocalPipeline:
                             )
 
                         if preprocess.save_vocals:
-                            vocals_dir = (
-                                Path(preprocess.vocals_directory_override)
-                                or vocals_folder
-                            )
-                            vocals_dir.mkdir(exist_ok=True)
                             filename = f"vocals_{generation.filename}_{i}.wav"
                             sf.write(
-                                vocals_dir / filename,
+                                vocals_folder / filename,
                                 vocals,
                                 sr,
                             )
@@ -317,14 +297,9 @@ class VocalPipeline:
                             logger.debug(sr)
                         vocals = enhance(df, df_state, audio)
                         if preprocess.save_vocals:
-                            vocals_dir = (
-                                Path(preprocess.vocals_directory_override)
-                                or vocals_folder
-                            )
-                            vocals_dir.mkdir(exist_ok=True)
                             filename = f"vocals_{generation.filename}_{i}.wav"
                             sf.write(
-                                vocals_dir / filename,
+                                vocals_folder / filename,
                                 vocals.cpu().float().numpy().T,
                                 sr,
                             )

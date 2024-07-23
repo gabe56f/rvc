@@ -21,7 +21,7 @@ class Generation:
 @input
 class Preprocess:
     input: str = field(description="The input for the preprocess. Start with 'file.'")
-    type: str = field(description="The type of the preprocess -- 'UVR' or 'MDX23C'.")
+    type: str = field(description="The type of the preprocess.")
     file: str = field(
         description="The file to use for the preprocess, only used with UVR."
     )
@@ -30,12 +30,6 @@ class Preprocess:
     )
     save_vocals: Optional[bool] = field(
         description="Whether to save the vocals to a file. Defaults to false."
-    )
-    accompaniment_directory_override: Optional[str] = field(
-        description="The directory to save the accompaniment to. (Defaults to './accompaniment/')"
-    )
-    vocals_directory_override: Optional[str] = field(
-        description="The directory to save the vocals to. (Defaults to './vocals/')"
     )
 
 
