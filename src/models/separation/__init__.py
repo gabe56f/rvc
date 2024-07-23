@@ -28,9 +28,9 @@ def load_mdx23c(
 
 def load_uvr(file: str, device: str = "cuda", dtype=torch.bfloat16) -> UVR:
     try:
-        uvr = UVR(10, file, device, dtype, True)
+        uvr = UVR(file, device, dtype, False)  # was i on fucking drugs???
     except Exception:
-        uvr = UVR(10, file, device, dtype, True)
+        uvr = UVR(file, device, dtype, True)
     return uvr
 
 

@@ -48,7 +48,6 @@ const example_preprocess = {
     input: "file",
     type: "MDX23C",
     file: "VR-DeEchoNormal.pth",
-    strength: 10,
     saveAccompaniment: true,
     saveVocals: true,
     accompanimentDirectoryOverride: null,

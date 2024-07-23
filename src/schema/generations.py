@@ -25,7 +25,6 @@ class Preprocess:
     file: str = field(
         description="The file to use for the preprocess, only used with UVR."
     )
-    strength: int = field(description="The strength of the preprocess.")
     save_accompaniment: Optional[bool] = field(
         description="Whether to save the accompaniment to a file. Defaults to true."
     )

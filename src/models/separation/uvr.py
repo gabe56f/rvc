@@ -373,7 +373,7 @@ class BaseNet(nn.Module):
 
 
 class CascadedNet(nn.Module):
-    def __init__(self, n_fft, nout=32, nout_lstm=128):
+    def __init__(self, n_fft: int, nout: int = 32, nout_lstm: int = 128):
         super(CascadedNet, self).__init__()
 
         self.max_bin = n_fft // 2
@@ -405,7 +405,7 @@ class CascadedNet(nn.Module):
         self.out = nn.Conv2d(nout, 2, 1, bias=False)
         self.aux_out = nn.Conv2d(3 * nout // 4, 2, 1, bias=False)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor):
         x = x[:, :, : self.max_bin]
 
         bandw = x.size()[2] // 2
@@ -443,16 +443,7 @@ class CascadedNet(nn.Module):
         else:
             return mask
 
-    def predict_mask(self, x):
-        mask = self.forward(x)
-
-        if self.offset > 0:
-            mask = mask[:, :, :, self.offset : -self.offset]
-            assert mask.size()[3] > 0
-
-        return mask
-
-    def predict(self, x, aggressiveness=None):
+    def predict(self, x: torch.Tensor) -> torch.Tensor:
         mask = self.forward(x)
         pred_mag = x * mask
 
@@ -514,7 +505,7 @@ class UVRParameters(object):
             },
         }
 
-    def parse_model_data(self, data: str):
+    def parse_model_data(self, data: str) -> dict:
         r: dict = json.loads(data, object_pairs_hook=int_key_selector)
         for k in [
             "mid_side",
@@ -530,7 +521,7 @@ class UVRParameters(object):
 
 
 class UVR:
-    def __init__(self, agg, model_path, device, dtype, new: bool = False):
+    def __init__(self, model_path, device, dtype, new: bool = False):
         self.model_path = model_path
         self.device = device
         self.dtype = dtype
@@ -538,7 +529,6 @@ class UVR:
             "postprocess": False,
             "tta": False,
             "window_size": 512,
-            "agg": agg,
             "high_end_process": "mirroring",
         }
 
@@ -615,14 +605,9 @@ class UVR:
                     :,
                 ]
         X_spec_m = spec_utils.combine_spectrograms(X_spec_s, self.params)
-        aggressive_set = float(self.data["agg"] / 100)
-        aggressiveness = {
-            "value": aggressive_set,
-            "split_bin": self.params.param["band"][1]["crop_stop"],
-        }
         with torch.no_grad():
             pred, X_mag, X_phase = _inference(
-                X_spec_m, self.device, self.dtype, self.model, aggressiveness, self.data
+                X_spec_m, self.device, self.dtype, self.model, self.data
             )
         if self.data["postprocess"]:
             pred_inv = np.clip(X_mag - pred, 0, np.inf)
@@ -658,7 +643,7 @@ class UVR:
         }
 
 
-def _inference(X_spec, device, dtype, model, aggressiveness, data):
+def _inference(X_spec, device, dtype, model, data):
     def make_padding(width, cropsize, offset):
         left = offset
         roi_size = cropsize - left * 2
@@ -668,7 +653,7 @@ def _inference(X_spec, device, dtype, model, aggressiveness, data):
 
         return left, right, roi_size
 
-    def _execute(X_mag_pad, roi_size, n_window, device, model, aggressiveness, dtype):
+    def _execute(X_mag_pad, roi_size, n_window, device, model, dtype):
         model.eval()
         with torch.no_grad():
             preds = []
@@ -680,7 +665,7 @@ def _inference(X_spec, device, dtype, model, aggressiveness, data):
                 X_mag_window = torch.from_numpy(X_mag_window)
                 X_mag_window = X_mag_window.to(device, dtype)
 
-                pred = model.predict(X_mag_window, aggressiveness)
+                pred = model.predict(X_mag_window)
 
                 pred = pred.detach().cpu().float().numpy()
                 preds.append(pred[0])
@@ -705,7 +690,7 @@ def _inference(X_spec, device, dtype, model, aggressiveness, data):
 
     X_mag_pad = np.pad(X_mag_pre, ((0, 0), (0, 0), (pad_l, pad_r)), mode="constant")
 
-    pred = _execute(X_mag_pad, roi_size, n_window, device, model, aggressiveness, dtype)
+    pred = _execute(X_mag_pad, roi_size, n_window, device, model, dtype)
     pred = pred[:, :, :n_frame]
 
     if data["tta"]:
@@ -715,9 +700,7 @@ def _inference(X_spec, device, dtype, model, aggressiveness, data):
 
         X_mag_pad = np.pad(X_mag_pre, ((0, 0), (0, 0), (pad_l, pad_r)), mode="constant")
 
-        pred_tta = _execute(
-            X_mag_pad, roi_size, n_window, device, model, aggressiveness, dtype
-        )
+        pred_tta = _execute(X_mag_pad, roi_size, n_window, device, model, dtype)
         pred_tta = pred_tta[:, :, roi_size // 2 :]
         pred_tta = pred_tta[:, :, :n_frame]
 

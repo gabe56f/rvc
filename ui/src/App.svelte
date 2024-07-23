@@ -163,16 +163,8 @@
         alertstuff.push("Preprocess #" + i + " doesn't have proper input set.");
       if (i != 1 && value.input[0] == "file")
         alertstuff.push("Preprocess #" + i + " doesn't have proper input set.");
-      if (value.type[0] == "UVR") {
-        if (value.model[0] == "")
-          alertstuff.push(
-            "Preprocess #" + i + " doesn't have proper model set."
-          );
-        if (value.strength[0] == 0)
-          alertstuff.push(
-            "Preprocess #" + i + " doesn't have proper strength set."
-          );
-      }
+      if (value.type[0] == "UVR" && value.model[0] == "")
+        alertstuff.push("Preprocess #" + i + " doesn't have proper model set.");
     }
 
     if (preprocess.length == 0 && preprocessOutput[0] != "file")
@@ -190,7 +182,6 @@
           input: value.input[0],
           type: value.type[0],
           file: value.model[0],
-          strength: value.strength[0],
           saveAccompaniment: value.saveAccompaniment,
           saveVocals: value.saveVocals,
           accompanimentDirectoryOverride: value.accompanimentLocation[0],
@@ -582,7 +573,6 @@
                   type: [""],
                   input: [preprocess.length == 0 ? "file" : ""],
                   model: [""],
-                  strength: [0],
                   saveVocals: false,
                   saveAccompaniment: false,
                   accompanimentLocation: ["accompaniment/"],
@@ -661,43 +651,16 @@
                   </Button>
                 </div>
                 {#if preprocessentry.type == "UVR"}
-                  <div class="inline-flex w-full">
-                    <div class="w-[50%]">
-                      <Form label="Model">
-                        <div slot="main">
-                          <Combobox
-                            bind:values={uvrModels}
-                            cclass="max-w-48"
-                            placeholder="Select a model..."
-                            bind:chosen={preprocessentry.model}
-                          />
-                        </div>
-                      </Form>
+                  <Form label="Model">
+                    <div slot="main">
+                      <Combobox
+                        bind:values={uvrModels}
+                        cclass="max-w-48"
+                        placeholder="Select a model..."
+                        bind:chosen={preprocessentry.model}
+                      />
                     </div>
-                    <div class="w-[50%]">
-                      <Form label="Strength">
-                        <div slot="main">
-                          <div
-                            class="py-1 inline-flex w-full justify-center align-center gap-2"
-                          >
-                            <div class="min-w-[75%] w-[75%]">
-                              <Slider
-                                min={0}
-                                max={100}
-                                step={10}
-                                bind:value={preprocessentry.strength}
-                              />
-                            </div>
-                            <p
-                              class="text-xn font-mono bg-muted rounded px-[0.3rem] py-[0.2rem]"
-                            >
-                              {preprocessentry.strength}
-                            </p>
-                          </div>
-                        </div>
-                      </Form>
-                    </div>
-                  </div>
+                  </Form>
                 {/if}
                 <div class="inline-flex w-full px-4 py-2 gap-2">
                   <Toggle
