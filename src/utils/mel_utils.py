@@ -103,8 +103,6 @@ def torch_mel_spectrogram(
     fmax: float,
     center: bool = False,
 ) -> torch.Tensor:
-    spec = torch_spectrogram(
-        y, n_fft, sampling_rate, hop_length, window_size, center=center
-    )
+    spec = torch_spectrogram(y, n_fft, hop_length, window_size, center=center)
     mel = torch_spec_to_mel(spec, n_fft, n_mels, sampling_rate, fmin, fmax)
     return mel

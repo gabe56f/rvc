@@ -6,6 +6,8 @@ weights/*
 !weights/.gitkeep
 
 train_logs/*
+!train_logs/mute/*
+
 wandb/*
 
 vocals/*
