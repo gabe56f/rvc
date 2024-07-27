@@ -1,10 +1,12 @@
-from src.logger import progress_bar
+from src.logger import progress_bar, Question
 
 import logging
 from collections import OrderedDict
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, field, asdict
+import functools
 from typing import (
     Any,
+    Callable,
     Dict,
     Protocol,
     Type,
@@ -15,6 +17,7 @@ from typing import (
     TYPE_CHECKING,
     Union,
 )
+import math
 from pathlib import Path
 from random import shuffle, randint
 import os
@@ -22,12 +25,15 @@ from warnings import simplefilter
 
 
 import cpuinfo
+from dataclasses_json import dataclass_json, Undefined
 from rich.progress import Progress
-from rich.prompt import Prompt, Confirm
+import rich.prompt as rp
 import torch
+from torch.amp import GradScaler
 from torch.utils.data import DataLoader
 import torch.distributed as dist
 import torch.nn.functional as F
+import torch.optim.swa_utils as S
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torchaudio import functional as Fa
 import numpy as np
@@ -65,14 +71,11 @@ from src.utils import (
 if TYPE_CHECKING:
     from lomo_optim import AdaLomo, Lomo
     from came_pytorch import CAME
-    import lpmm
-    from sophia import SophiaG
     from adan import Adan
 
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
 
 os.environ["MASTER_ADDR"] = "localhost"
 os.environ["MASTER_PORT"] = str(randint(20000, 55555))
@@ -105,10 +108,7 @@ OptimizerList = Literal[
     "adam",
     "adamw",
     "adamw_8bit",
-    "adamw_4bit",
-    "adamw_apex",
     "adan",
-    "sophia",
     "lomo",
     "adalomo",
     "came",
@@ -118,32 +118,24 @@ OptimizerType = Union[
     "AdaLomo",
     "Lomo",
     "CAME",
-    "lpmm.optim.AdamW",
-    "SophiaG",
     "Adan",
 ]
 
 
+@dataclass_json(undefined=Undefined.EXCLUDE)
 @dataclass
 class TrainParameters:
-    log_interval: int = 1
-    seed: int = 1234
-    epochs: int = 3000
-    learning_rate: float = 1e-4
     betas: List[float] = field(default_factory=lambda: [0.8, 0.99])
     eps: float = 1e-9
-    batch_size: int = 36
-    dtype: Literal["float32", "bfloat16", "float16"] = "bfloat16"
     lr_decay: float = 0.999875
     segment_size: int = 12800
     init_lr_ratio: float = 1
     warmup_epochs: int = 0
     c_mel: int = 45
     c_kl: float = 1.0
-    optimizer: OptimizerList = "adamw"
-    scheduler: Literal["exponential", "constant", "cosine"] = "exponential"
 
 
+@dataclass_json
 @dataclass
 class DataParameters:
     max_wav_value: float = 32768
@@ -156,6 +148,7 @@ class DataParameters:
     mel_fmax: Optional[float] = None
 
 
+@dataclass_json
 @dataclass
 class ModelParameters:
     inter_channels: int = 192
@@ -178,6 +171,7 @@ class ModelParameters:
     spk_embed_dim: int = 109
 
 
+@dataclass_json
 @dataclass
 class TrainingParameters:
     train = TrainParameters()
@@ -189,27 +183,54 @@ class TrainingParameters:
 class InputParameters:
     training_files: Path
     model_files: Path
+
     used_device: torch.device
+    dtype: torch.dtype
+    cache_data: bool = True
+
     save_every: int = 200
     latest_only: bool = False
-    pitch_extractor: str = "rmvpe"
-    cache_data: bool = True
+
+    pitch_extractor: str = "rmvpe"  # TODO: expose to user
+
     pretrain_g: str = ""
     pretrain_d: str = ""
     version: str = "v2"
-    dataloader_workers: int = 4
+    sampling_rate: Literal["32k", "40k", "48k"] = (
+        "40k"  # TODO: implement config loading
+    )
 
-    def get_rvc_config(self, hyperparameters: TrainingParameters) -> RVCConfig:
-        dtype = getattr(torch, hyperparameters.train.dtype)
+    batch_size: int = 36
+    gradient_accumulation_steps: int = 1
+    dataloader_workers: int = (
+        4  # TODO: adjust this according to available cores. dw=max(int(cores/3), 1)
+    )
 
+    secondary_model: Literal["none", "swa", "ema"] = "none"
+    secondary_start: int = -1  # -1 to disable
+    swa_lr = 5e-4
+    ema_delta: float = 0.995  # default: 0.995
+
+    log_interval: int = 5
+    seed: int = 1337
+    epochs: int = 1000
+    learning_rate: float = 2e-4
+
+    optimizer: OptimizerList = "adamw"
+    compile_optimizer: bool = False  # should net a decent speedup TODO: expose
+    scheduler: Literal["exponential", "constant", "cosine"] = "constant"
+
+    def get_rvc_config(self) -> RVCConfig:
         return RVCConfig(
             device=self.used_device,
-            dtype=dtype,
+            dtype=self.dtype,
         )
 
 
 class TrainingLogger(Protocol):
     def log(self, log: Dict[str, Any]) -> None: ...
+
+    def finish(self) -> None: ...
 
 
 class CLITrainingLogger:
@@ -237,6 +258,9 @@ class CLITrainingLogger:
             if i < log_len - 1:
                 out += " | "
         logger.info(out, extra={"markup": True})
+
+    def finish(self) -> None:
+        return
 
 
 class Slicer:
@@ -503,14 +527,13 @@ def preprocess(
 def extract_features(
     output_dir: Path,
     input_parameters: InputParameters,
-    hyperparameters: TrainingParameters,
     progress: Progress,
 ) -> Path:
     gt_wavs = output_dir / gt
     features_dir = output_dir / features
     features_dir.mkdir(exist_ok=True)
 
-    dtype = getattr(torch, hyperparameters.train.dtype)
+    dtype = input_parameters.dtype
     hubert.to(input_parameters.used_device, dtype)
     hubert.eval()
 
@@ -525,11 +548,15 @@ def extract_features(
         inputs = {
             "source": feats.to(input_parameters.used_device, dtype),
             "padding_mask": padding_mask.to(input_parameters.used_device),
-            "output_layer": 9 if input.version == "v1" else 12,
+            "output_layer": 9 if input_parameters.version == "v1" else 12,
         }
         with torch.no_grad():
             logits = hubert.extract_features(**inputs)
-            feats = hubert.final_proj(logits[0]) if input.version == "v1" else logits[0]
+            feats = (
+                hubert.final_proj(logits[0])
+                if input_parameters.version == "v1"
+                else logits[0]
+            )
 
         feats = feats.squeeze(0).float().cpu().numpy()
         if np.isnan(feats).sum() == 0:
@@ -542,7 +569,6 @@ def extract_features(
 def extract_f0(
     output_dir: Path,
     input_parameters: InputParameters,
-    hyperparameters: TrainingParameters,
     progress: Progress,
 ) -> Path:
     f0_dir = output_dir / f0
@@ -554,7 +580,7 @@ def extract_f0(
     files = filter(lambda x: "spec" not in x, files)
     files = list(map(lambda x: output_dir / sixteenk / x, files))
     total = len(files)
-    rvc_config = input_parameters.get_rvc_config(hyperparameters)
+    rvc_config = input_parameters.get_rvc_config()
     for file in progress.track(files, total=total, description="Extracting F0..."):
         wav, _ = load_audio(file, 16000)
         (f0_coarse, f0_), wav = compute_pitch_from_audio(
@@ -609,20 +635,41 @@ def read_wave(wav_path: Path, normalize: bool = False) -> torch.Tensor:
     return feats
 
 
-def setup_logging(training_parameters: TrainingParameters) -> TrainingLogger:
+def setup_logging(
+    input_parameters: InputParameters, training_parameters: TrainingParameters
+) -> TrainingLogger:
     if not USE_WANDB:
         return CLITrainingLogger()
-    return wandb.init(
+    x = wandb.init(
+        name=input_parameters.model_files.name,
         project="rvc",
-        config=asdict(training_parameters.train),
+        config={**asdict(training_parameters.train), **asdict(input_parameters)},
     )
 
+    return x
 
-def choose_models(version: str) -> Tuple[Type, Type]:
-    """ret: [G, D]"""
+
+def choose_models(
+    version: str, hyperparameters: TrainingParameters
+) -> Tuple[Type, Type]:
+    """return: [G, D]"""
     if version.lower() == "v2":
-        return SynthesizerTrnMs768NSFsid, MultiPeriodDiscriminatorV2
-    return SynthesizerTrnMs256NSFsid, MultiPeriodDiscriminator
+        G, D = SynthesizerTrnMs768NSFsid, MultiPeriodDiscriminatorV2
+    else:
+        G, D = SynthesizerTrnMs256NSFsid, MultiPeriodDiscriminator
+
+    def g():
+        return G(
+            hyperparameters.data.filter_length // 2 + 1,
+            hyperparameters.train.segment_size // hyperparameters.data.hop_length,
+            sr=hyperparameters.data.sampling_rate,
+            **asdict(hyperparameters.model),
+        )
+
+    def d():
+        return D(hyperparameters.model.use_spectral_norm)
+
+    return g, d
 
 
 def choose_optimizer(
@@ -631,43 +678,117 @@ def choose_optimizer(
     lr: float,
     betas: List[float],
     eps: float,
-) -> OptimizerType:
+    weight_decay: float = 1e-2,  # default adamw value
+) -> Tuple[OptimizerType, bool]:
+    """return: (optimizer, can_compile)"""
     if optimizer == "adamw":
-        return torch.optim.AdamW(model.parameters(), lr=lr, betas=betas, eps=eps)
+        return (
+            torch.optim.AdamW(
+                model.parameters(),
+                lr=lr,
+                betas=betas,
+                eps=eps,
+                foreach=True,
+                fused=False,  # fused doesn't seem to work?
+                amsgrad=True,  # try to use amsgrad to stabilize training??
+                weight_decay=weight_decay,
+            ),
+            True,
+        )
     elif optimizer == "adamw_8bit":
         from bitsandbytes.optim import AdamW8bit
 
-        return AdamW8bit(model.parameters(), lr=lr, betas=betas, eps=eps)
+        return (
+            AdamW8bit(
+                model.parameters(),
+                lr=lr,
+                betas=betas,
+                eps=eps,
+                amsgrad=True,
+                optim_bits=16,  # base on fp16
+                percentile_clipping=99,
+                weight_decay=weight_decay,
+            ),
+            True,
+        )
     elif optimizer == "adam":
-        return torch.optim.Adam(model.parameters(), lr=lr, betas=betas, eps=eps)
+        return (
+            torch.optim.Adam(
+                model.parameters(),
+                lr=lr,
+                betas=betas,
+                eps=eps,
+                amsgrad=True,
+                weight_decay=weight_decay,
+                foreach=True,
+                fused=False,
+            ),
+            True,
+        )
     elif optimizer == "adalomo":
         from lomo_optim import AdaLomo
 
-        return AdaLomo(model, lr=lr, eps=eps, clip_grad_norm=1.0)
+        return (
+            AdaLomo(
+                model,
+                lr=lr,
+                eps=(eps, 0.001),
+                clip_grad_norm=1.0,
+                weight_decay=weight_decay,
+                clip_threshold=0.99,
+            ),
+            False,
+        )
     elif optimizer == "lomo":
         from lomo_optim import Lomo
 
-        return Lomo(model, lr=lr, clip_grad_norm=1.0)
-    elif optimizer == "adamw_apex":
-        raise NotImplementedError("Apex is not supported yet.")
+        return (
+            Lomo(
+                model,
+                lr=lr,
+                clip_grad_norm=1.0,
+                weight_decay=weight_decay,
+                clip_threshold=0.99,
+            ),
+            False,
+        )
     elif optimizer == "came":
         from came_pytorch import CAME
 
-        return CAME(model.parameters(), lr=lr, betas=[0.8, 0.99, 0.9999])
-    elif optimizer == "adamw_4bit":
-        import lpmm
-
-        return lpmm.optim.AdamW(
-            model.parameters(), lr=lr, betas=betas, eps=eps, fused=True
+        return (
+            CAME(
+                model.parameters(),
+                lr=lr,
+                betas=[
+                    0.9,
+                ]
+                + betas,
+                weight_decay=weight_decay,
+                clip_threshold=0.99,
+            ),
+            False,
         )
     elif optimizer == "adan":
         from adan import Adan
 
-        return Adan(model.parameters(), lr=lr, eps=eps, fused=True)
+        return (
+            Adan(
+                model.parameters(),
+                betas=[
+                    0.9,
+                ]
+                + betas,
+                lr=lr,
+                eps=eps,
+                fused=True,
+                no_prox=True,  # reproduce adamw behaviour
+            ),
+            False,
+        )
 
 
 def choose_scheduler(
-    sched: Literal["exponential", "constant", "cosine"],
+    sched: Literal["exponential", "constant", "cosine", "swa"],
     optimizer: torch.optim.Optimizer,
     gamma: float,
     last_epoch: int,
@@ -685,6 +806,8 @@ def choose_scheduler(
         return torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer=optimizer, T_max=max_epochs, last_epoch=last_epoch
         )
+    elif sched == "swa":
+        return S.SWALR(optimizer=optimizer, swa_lr=gamma)
     return None
 
 
@@ -704,12 +827,11 @@ def save_small_model(
     name: str,
     epoch: int,
     hps: TrainingParameters,
-    version: str = "v2",
-    sr: int = 40000,
+    input_parameters: InputParameters,
 ):
     opt = OrderedDict()
     opt["weight"] = {}
-    dtype = getattr(torch, hps.train.dtype)
+    dtype = input_parameters.dtype
     for key in ckpt.keys():
         if "enc_q" in key:
             continue
@@ -735,9 +857,9 @@ def save_small_model(
         hps.data.sampling_rate,
     ]
     opt["info"] = f"{epoch}epoch"
-    opt["sr"] = sr
+    opt["sr"] = int(input_parameters.sampling_rate.replace("k", "")) * 1000
     opt["f0"] = 1
-    opt["version"] = version
+    opt["version"] = input_parameters.version
     (Path("models/") / name).mkdir(exist_ok=True, parents=True)
     torch.save(opt, f"models/{name}/checkpoint.pth")
     return "Success."
@@ -755,19 +877,19 @@ def run(
     )
 
     # set seed
-    torch.manual_seed(hyperparameters.train.seed)
+    torch.manual_seed(input.seed)
     if input.used_device.type == "cuda" and torch.cuda.is_available():
-        torch.cuda.manual_seed(hyperparameters.train.seed)
+        torch.cuda.manual_seed(input.seed)
         torch.cuda.set_device(rank)
 
-    dtype = getattr(torch, hyperparameters.train.dtype)
+    dtype = input.dtype
 
     train_dataset = TextAudioLoaderMultiNSFsid(
         input.model_files / "filelist.txt", hyperparameters.data
     )
     train_sampler = DistributedBucketSampler(
         train_dataset,
-        batch_size=hyperparameters.train.batch_size * n_gpus,
+        batch_size=input.batch_size * n_gpus,
         boundaries=list(map(lambda x: x * 100, range(1, 10))),
         num_replicas=n_gpus,
         rank=rank,
@@ -785,21 +907,119 @@ def run(
         persistent_workers=True,
         prefetch_factor=8,
     )
-    G, D = choose_models(input.version)
-    net_g = G(
-        hyperparameters.data.filter_length // 2 + 1,
-        hyperparameters.train.segment_size // hyperparameters.data.hop_length,
-        sr=hyperparameters.data.sampling_rate,
-        **asdict(hyperparameters.model),
-    ).to(input.used_device, dtype)
-    net_d = D(hyperparameters.model.use_spectral_norm).to(input.used_device, dtype)
+    G, D = choose_models(input.version, hyperparameters)
+    net_g = G().to(input.used_device, dtype)
+    net_d = D().to(input.used_device, dtype)
 
-    optim = hyperparameters.train.optimizer
-    lr = hyperparameters.train.learning_rate
+    optim = input.optimizer
+    lr = input.learning_rate
     betas = hyperparameters.train.betas
     eps = hyperparameters.train.eps
-    optimizer_g = choose_optimizer(optim, net_g, lr, betas, eps)
-    optimizer_d = choose_optimizer(optim, net_d, lr, betas, eps)
+    optimizer_g, can_comp = choose_optimizer(optim, net_g, lr, betas, eps)
+    optimizer_d, _ = choose_optimizer(optim, net_d, lr, betas, eps)
+
+    needs_unscale = True
+
+    def step(
+        opt: OptimizerType,
+        loss: torch.Tensor,
+        scaler: Optional[GradScaler],
+        ema: Optional[S.AveragedModel],
+        net: torch.nn.Module,
+        epoch: int,
+        accumulated: bool = False,
+        last: bool = False,
+    ):
+        nonlocal needs_unscale
+
+        lr = opt.param_groups[0]["lr"]
+        if scaler is not None and needs_unscale:
+            scaler.scale(loss).backward()
+            if accumulated:
+                try:
+                    scaler.unscale_(opt)
+                    scaler.step(opt)
+                    if last:
+                        scaler.update()
+                except ValueError:
+                    needs_unscale = False
+                    opt.zero_grad()
+                    logger.warning(
+                        "GradScaler failed, disabling for the rest of training."
+                    )
+                    step(opt, loss, scaler, ema, net, epoch, accumulated, last)
+        else:
+            if "lomo" in input.optimizer:
+                opt: Lomo
+                opt.grad_norm(loss)
+                opt.fused_backward(loss, lr)
+            else:
+                loss.backward()
+                if accumulated:
+                    opt.step()
+
+        if ema is not None and accumulated and epoch >= input.secondary_start:
+            ema.update_parameters(net)
+
+    # Have to do this here, since can't deepcopy DDP modules.
+    sec_nets = [None, None]
+    sec_lr = [None, None]
+    if input.secondary_model != "none":
+        logger.info(f"Constructing {input.secondary_model.upper()} models.")
+
+        # All this, just to avoid deepcopy...
+        def create_avg_model(
+            constr, device, avg_fn=None, multi_avg_fn=None
+        ) -> S.AveragedModel:
+            net: S.AveragedModel = S.AveragedModel.__new__(S.AveragedModel)
+            torch.nn.Module.__init__(net)
+            net.module = constr().to(device, dtype)
+            net.register_buffer(
+                "n_averaged", torch.tensor(0, dtype=torch.long, device=device)
+            )
+            net.avg_fn = None
+            net.avg_fn = avg_fn
+            net.multi_avg_fn = multi_avg_fn
+            net.use_buffers = True
+            return net
+
+        if input.secondary_model == "ema":
+            sec_nets[0] = create_avg_model(
+                G,
+                input.used_device,
+                multi_avg_fn=S.get_ema_multi_avg_fn(input.ema_delta),
+            )
+            sec_nets[1] = create_avg_model(
+                D,
+                input.used_device,
+                multi_avg_fn=S.get_ema_multi_avg_fn(input.ema_delta),
+            )
+            logger.info(
+                f"Using EMA with a={input.ema_delta}, expect increased training time and slightly increased memory usage."
+            )
+        elif input.secondary_model == "swa":
+            sec_nets[0] = create_avg_model(
+                lambda: G(
+                    hyperparameters.data.filter_length // 2 + 1,
+                    hyperparameters.train.segment_size
+                    // hyperparameters.data.hop_length,
+                    sr=hyperparameters.data.sampling_rate,
+                    **asdict(hyperparameters.model),
+                ),
+                input.used_device,
+                multi_avg_fn=S.get_swa_multi_avg_fn(),
+            )
+            sec_nets[1] = create_avg_model(
+                lambda: D(hyperparameters.model.use_spectral_norm),
+                input.used_device,
+                multi_avg_fn=S.get_swa_multi_avg_fn(),
+            )
+
+            sec_lr[0] = choose_scheduler("swa", optimizer_g, input.swa_lr, -1, -1)
+            sec_lr[1] = choose_scheduler("swa", optimizer_d, input.swa_lr, -1, -1)
+            logger.info(
+                f"Using SWA with lr={input.swa_lr}, expect increased training time and slightly increased memory usage."
+            )
 
     if input.used_device.type == "cuda" and torch.cuda.is_available():
         net_g = DDP(net_g, device_ids=[rank])
@@ -838,63 +1058,126 @@ def run(
             net_d.module.load_state_dict(
                 torch.load(input.pretrain_d, map_location="cpu")["model"]
             )
-    sched = hyperparameters.train.scheduler
+
+    if sec_nets[0] is not None:
+        sec_nets[0].module.load_state_dict(net_g.module.state_dict())
+        sec_nets[1].module.load_state_dict(net_d.module.state_dict())
+
+    sched = input.scheduler
     scheduler_g = choose_scheduler(
         sched,
         optimizer_g,
         hyperparameters.train.lr_decay,
         epoch_str - 2,
-        hyperparameters.train.epochs,
+        input.epochs,
     )
     scheduler_d = choose_scheduler(
         sched,
         optimizer_d,
         hyperparameters.train.lr_decay,
         epoch_str - 2,
-        hyperparameters.train.epochs,
+        input.epochs,
     )
+
+    if can_comp and input.compile_optimizer:
+        # need to do this here, because schedulers can wrap .step
+        optimizer_g.step = torch.compile(optimizer_g.step, fullgraph=False)
+        optimizer_d.step = torch.compile(optimizer_d.step, fullgraph=False)
 
     if (
         input.used_device.type == "cuda"
         and torch.cuda.is_available()
-        and hyperparameters.train.dtype == "float16"
+        and input.dtype == "float16"
     ):
-        # from torch.cuda.amp import GradScaler
-
-        # scaler = GradScaler(enabled=True)
-        scaler = None
+        scaler = GradScaler(enabled=True)
     else:
         scaler = None
 
-    train_logger = setup_logging(hyperparameters)
+    logger.info(f"Steps/epoch is {len(train_loader)}.")
+    logger.info(
+        f"Effective batch size is {input.batch_size * n_gpus * input.gradient_accumulation_steps}. (batch * used_gpus * grad_accumulation_steps)"
+    )
+    logger.info(
+        f"Therefore, effective updates/epoch is {int(math.ceil(len(train_loader) / input.gradient_accumulation_steps))}."
+    )
+
+    train_logger = setup_logging(input, hyperparameters)
 
     cache = []
     with progress_bar as progress:
-        task = progress.add_task("Training...", total=hyperparameters.train.epochs + 1)
+        task = progress.add_task("Training...", total=input.epochs + 1)
         progress.update(task, advance=epoch_str)
-        for epoch in progress.track(
-            range(epoch_str, hyperparameters.train.epochs + 1), task_id=task
-        ):
+
+        for epoch in progress.track(range(epoch_str, input.epochs + 1), task_id=task):
             train_and_evaluate(
                 epoch,
                 dtype,
                 hyperparameters,
                 input,
                 [net_g, net_d],
-                [optimizer_g, optimizer_d],
+                sec_nets,
+                [
+                    (optimizer_g, functools.partial(step, optimizer_g)),
+                    (optimizer_d, functools.partial(step, optimizer_d)),
+                ],
                 scaler,
                 [train_loader, None],
                 train_logger,
                 cache,
             )
-            scheduler_g.step()
-            scheduler_d.step()
+
+            if sec_lr[0] is not None and input.secondary_start >= epoch:
+                sec_lr[0].step()
+                sec_lr[1].step()
+            else:
+                scheduler_g.step()
+                scheduler_d.step()
+
+    if input.secondary_model != "none":
+        S.update_bn(train_loader, sec_nets[0], device=input.used_device)
+        S.update_bn(train_loader, sec_nets[1], device=input.used_device)
+
+        if not input.latest_only:
+            save_checkpoint(
+                net_g,
+                optimizer_g,
+                logger,
+                input.learning_rate,
+                epoch,
+                os.path.join(input.model_files, f"SEC_G_{epoch}.pth"),
+            )
+            save_checkpoint(
+                net_d,
+                optimizer_d,
+                logger,
+                input.learning_rate,
+                epoch,
+                os.path.join(input.model_files, f"SEC_D_{epoch}.pth"),
+            )
+        else:
+            save_checkpoint(
+                net_g,
+                optimizer_g,
+                logger,
+                input.learning_rate,
+                epoch,
+                os.path.join(input.model_files, "SEC_G_2333333.pth"),
+            )
+            save_checkpoint(
+                net_d,
+                optimizer_d,
+                logger,
+                input.learning_rate,
+                epoch,
+                os.path.join(input.model_files, "SEC_D_2333333.pth"),
+            )
+
     if not input.latest_only:
         save_checkpoint(
             net_g,
             optimizer_g,
             logger,
-            hyperparameters.train.learning_rate,
+            input.learning_rate,
             epoch,
             os.path.join(input.model_files, f"G_{epoch}.pth"),
         )
@@ -902,7 +1185,7 @@ def run(
             net_d,
             optimizer_d,
             logger,
-            hyperparameters.train.learning_rate,
+            input.learning_rate,
             epoch,
             os.path.join(input.model_files, f"D_{epoch}.pth"),
         )
@@ -911,7 +1194,7 @@ def run(
             net_g,
             optimizer_g,
             logger,
-            hyperparameters.train.learning_rate,
+            input.learning_rate,
             epoch,
             os.path.join(input.model_files, "G_2333333.pth"),
         )
@@ -919,10 +1202,11 @@ def run(
             net_d,
             optimizer_d,
             logger,
-            hyperparameters.train.learning_rate,
+            input.learning_rate,
             epoch,
             os.path.join(input.model_files, "D_2333333.pth"),
         )
+    train_logger.finish()
 
 
 def train_and_evaluate(
@@ -931,8 +1215,25 @@ def train_and_evaluate(
     hyperparameters: TrainingParameters,
     input: InputParameters,
     nets: List[torch.nn.Module],
-    optimizers: List[torch.optim.Optimizer],
-    scaler: Optional[torch.cuda.amp.GradScaler],
+    ema_nets: List[Optional[S.AveragedModel]],
+    optimizers: List[
+        Tuple[
+            torch.optim.Optimizer,
+            Callable[
+                [
+                    torch.Tensor,
+                    Optional[GradScaler],
+                    Optional[S.AveragedModel],
+                    torch.nn.Module,
+                    int,
+                    bool,
+                    bool,
+                ],
+                None,
+            ],
+        ]
+    ],
+    scaler: Optional[torch.amp.GradScaler],
     loaders: List[DataLoader],
     train_logger: TrainingLogger,
     cache: List[Dict[str, Any]],
@@ -940,10 +1241,12 @@ def train_and_evaluate(
     global global_step
 
     net_g, net_d = nets
-    optimizer_g, optimizer_d = optimizers
+    ema_g, ema_d = ema_nets
+    (optimizer_g, step_g), (optimizer_d, step_d) = optimizers
     train_loader, _ = loaders
 
     train_loader.batch_sampler.set_epoch(epoch)
+    train_len = len(train_loader)
     net_g.train()
     net_d.train()
 
@@ -994,6 +1297,10 @@ def train_and_evaluate(
         data_iterator = enumerate(train_loader)
 
     for batch_idx, info in data_iterator:
+        accumulated = (batch_idx + 1) % input.gradient_accumulation_steps == 0 or (
+            batch_idx + 1
+        ) == train_len
+
         (
             phone,
             phone_lengths,
@@ -1064,20 +1371,8 @@ def train_and_evaluate(
                 loss_disc, losses_disc_r, losses_disc_g = discriminator_loss(
                     y_d_hat_r, y_d_hat_g
                 )
-        optimizer_d.zero_grad()
-        if scaler is not None:
-            scaler.scale(loss_disc).backward()
-            scaler.unscale_(optimizer_d)
-            scaler.step(optimizer_d)
-        else:
-            if "lomo" in hyperparameters.train.optimizer:
-                optimizer_d: Lomo
-                optimizer_d.grad_norm(loss_disc)
-                lr = optimizer_d.param_groups[0]["lr"]
-                optimizer_d.fused_backward(loss_disc, lr)
-            else:
-                loss_disc.backward()
-                optimizer_d.step()
+
+        step_d(loss_disc, scaler, ema_d, net_d, epoch, accumulated)
 
         with torch.autocast(
             device_type=input.used_device.type,
@@ -1094,21 +1389,10 @@ def train_and_evaluate(
                 loss_fm = feature_loss(fmap_r, fmap_g)
                 loss_gen, losses_gen = generator_loss(y_d_hat_g)
                 loss_gen_all = loss_gen + loss_fm + loss_mel + loss_kl
-        optimizer_g.zero_grad()
-        if scaler is not None:
-            scaler.scale(loss_gen_all).backward()
-            scaler.unscale_(optimizer_g)
-            scaler.step(optimizer_g)
-            scaler.update()
-        else:
-            if "lomo" in hyperparameters.train.optimizer:
-                optimizer_g.grad_norm(loss_gen_all)
-                lr = optimizer_g.param_groups[0]["lr"]
-                optimizer_g.fused_backward(loss_gen_all, lr)
-            else:
-                loss_gen_all.backward()
-                optimizer_g.step()
-        if global_step % hyperparameters.train.log_interval == 0:
+
+        step_g(loss_gen_all, scaler, ema_g, net_g, epoch, accumulated, True)
+
+        if global_step % input.log_interval == 0:
             lr = optimizer_g.param_groups[0]["lr"]
             train_logger.log(
                 {
@@ -1129,7 +1413,7 @@ def train_and_evaluate(
                 net_g,
                 optimizer_g,
                 logger,
-                hyperparameters.train.learning_rate,
+                input.learning_rate,
                 epoch,
                 os.path.join(input.model_files, f"G_{epoch}.pth"),
             )
@@ -1137,7 +1421,7 @@ def train_and_evaluate(
                 net_d,
                 optimizer_d,
                 logger,
-                hyperparameters.train.learning_rate,
+                input.learning_rate,
                 epoch,
                 os.path.join(input.model_files, f"D_{epoch}.pth"),
             )
@@ -1146,7 +1430,7 @@ def train_and_evaluate(
                 net_g,
                 optimizer_g,
                 logger,
-                hyperparameters.train.learning_rate,
+                input.learning_rate,
                 epoch,
                 os.path.join(input.model_files, "G_2333333.pth"),
             )
@@ -1154,193 +1438,396 @@ def train_and_evaluate(
                 net_d,
                 optimizer_d,
                 logger,
-                hyperparameters.train.learning_rate,
+                input.learning_rate,
                 epoch,
                 os.path.join(input.model_files, "D_2333333.pth"),
             )
 
 
-if __name__ == "__main__":
-    while True:
-        choice = Prompt.ask(
-            "Do you want to extract a model or train a new one?",
-            choices=["extract", "train", "index"],
-            default="train",
+class Choice(Protocol):
+    def __call__(self, device, dtype) -> Dict[str, Any]: ...
+
+
+class FileChoice:
+    def __init__(self, path: str, filter: str = ""):
+        self.path: Path = Path(f"{path}/")
+        self.filter = filter
+
+    def __call__(self, device, dtype) -> Dict[str, Path]:
+        return list(
+            filter(
+                lambda x: self.filter.lower() in x[0].lower(),
+                map(lambda x: (x.name, x), self.path.iterdir()),
+            ),
         )
 
-        if choice == "extract":
-            model_name = Prompt.ask("Model name?", default="rvc_model")
-            model_path = Path("models") / model_name
-            model_path.mkdir(exist_ok=True, parents=True)
 
-            log_dir = Path("train_logs") / model_name
+class DeviceChoice:
+    def __init__(self):
+        device_list = []
+        device_list_ = []
+        if torch.cuda.is_available():
+            for i in range(torch.cuda.device_count()):
+                device_list.append("(CUDA) " + torch.cuda.get_device_name(i))
+                device_list_.append(f"cuda:{i}")
 
-            ckpt = torch.load(
-                latest_checkpoint_path(log_dir, "G_*.pth"), map_location="cpu"
-            )["model"]
-            hps = TrainingParameters()
-            hps.train.dtype = Prompt.ask(
-                "What dtype should it be saved in?",
-                choices=["float32", "float16", "bfloat16"],
-                default="bfloat16",
-            )
+        if torch.backends.mps.is_available():
+            device_list.append("MPS")
+            device_list_.append("mps")
 
-            save_small_model(ckpt, model_name, 0, hps, sr=40000)
-        elif choice == "index":
-            model_name = Prompt.ask("Model name?", default="rvc_model")
-            model_path = Path("models") / model_name
-            model_path.mkdir(exist_ok=True, parents=True)
+        device_list.append(cpuinfo.get_cpu_info()["brand_raw"])
+        device_list_.append("cpu")
+        self.dev = [(x, y) for (x, y) in zip(device_list, device_list_)]
 
-            log_dir = Path("train_logs") / model_name
-            input = InputParameters(
-                training_files=None,
-                model_files=model_path,
-                used_device=None,
-            )
-            train_index(log_dir, input)
-        elif choice == "train":
-            input = InputParameters(
-                training_files=Path("input_files/"),
-                model_files=Path("output/"),
-                used_device=torch.device("cuda"),
-                cache_data=True,
-                pretrain_g="weights/G_RIN_E.pth",
-                pretrain_d="weights/D_RIN_E.pth",
-            )
-            hyperparameters = TrainingParameters()
-            hyperparameters.train.dtype = "bfloat16"
-            hyperparameters.train.optimizer = "lomo"
-            hyperparameters.train.scheduler = "exponential"
+    def __call__(self, device, dtype) -> Dict[str, torch.device]:
+        return self.dev
 
-            G_list = list(os.listdir("weights/"))
-            G_list = list(
-                filter(lambda x: "g_" in x.lower() or "_g" in x.lower(), G_list)
-            )
 
-            D_list = list(os.listdir("weights/"))
-            D_list = list(
-                filter(lambda x: "d_" in x.lower() or "_d" in x.lower(), D_list)
-            )
+class DtypeChoice:
+    def __call__(self, device, dtype) -> Dict[str, torch.dtype]:
+        dtypes = ["float32", "float16", "bfloat16"]
+        supported = []
+        for dt in dtypes:
+            try:
+                dtype = getattr(torch, dt)
+                a = torch.tensor([1.0], device=device, dtype=dtype)
+                b = torch.tensor([2.0], device=device, dtype=dtype)
+                torch.matmul(a, b)
+                supported.append((dt, dtype))
+            except RuntimeError:
+                pass
+            except AssertionError:
+                pass
+        return supported
 
-            device_list = []
-            device_list_ = []
-            if torch.cuda.is_available():
-                for i in range(torch.cuda.device_count()):
-                    device_list.append("(CUDA) " + torch.cuda.get_device_name(i))
-                    device_list_.append(f"cuda:{i}")
 
-            if torch.backends.mps.is_available():
-                device_list.append("MPS")
-                device_list_.append("mps")
-
-            device_list.append(cpuinfo.get_cpu_info()["brand_raw"])
-            device_list_.append("CPU")
-
-            logger.info("Available devices:")
-            for i, device in enumerate(device_list):
-                logger.info(f" - {i}: {device}")
-
-            device = device_list_[
-                int(
-                    Prompt.ask(
-                        "Which device do you want to use?",
-                        choices=list(map(str, range(len(device_list)))),
-                        default="0",
-                    )
-                )
+class OptimizerChoice:
+    def __call__(self, device, dtype) -> Dict[str, Any]:
+        return [
+            (x, x)
+            for x in [
+                "adamw",
+                "adamw_8bit",
+                "adam",
+                "adan",
+                "adalomo",
+                "lomo",
+                "came",
             ]
+        ]
 
-            dtypes = ["float32", "float16", "bfloat16"]
-            supported = []
-            for dt in dtypes:
-                try:
-                    dtype = getattr(torch, dt)
-                    a = torch.tensor([1.0], device=device, dtype=dtype)
-                    b = torch.tensor([2.0], device=device, dtype=dtype)
-                    torch.matmul(a, b)
-                    supported.append(dt)
-                except RuntimeError:
-                    pass
-                except AssertionError:
-                    pass
-            dtype = Prompt.ask(
-                "Which dtype do you want to use?",
-                choices=supported,
-                default=supported[-1],
-            )
-            input.used_device = torch.device(device)
-            hyperparameters.train.dtype = dtype
 
-            input_files = Prompt.ask("Input audio files?", default="./train_input/")
-            input.training_files = Path(input_files)
+def _extract_model(responses: Dict[str, Any]):
+    model_path = Path("models/") / responses["model_name"].name
+    model_path.mkdir(exist_ok=True, parents=True)
 
-            model_name = Prompt.ask(
-                "What should the model be named?", default="rvc_model"
-            )
-            input.model_files = output_dir = Path("train_logs") / model_name
+    ckpt = torch.load(
+        latest_checkpoint_path(responses["model_name"], "G_*.pth"), map_location="cpu"
+    )["model"]
+    hps = TrainingParameters()
+    input = InputParameters(
+        training_files=None,
+        model_files=model_path,
+        used_device=None,
+        dtype=responses["dtype"],
+    )
 
-            hyperparameters.train.batch_size = int(
-                Prompt.ask("Batch size?", default="12")
-            )
-            hyperparameters.train.learning_rate = float(
-                Prompt.ask("Learning rate?", default="1e-4")
-            )
-            hyperparameters.train.epochs = int(
-                Prompt.ask("Number of epochs?", default="1000")
-            )
-            hyperparameters.train.log_interval = int(
-                Prompt.ask("Log interval?", default="5")
-            )
-            input.save_every = int(Prompt.ask("Save interval?", default="100"))
-            input.latest_only = Confirm.ask("Save only the latest model?", default="y")
-            input.cache_data = Confirm.ask("Cache all data to GPU memory?", default="y")
-            hyperparameters.train.seed = int(Prompt.ask("Seed?", default="1337"))
-            hyperparameters.train.optimizer = Prompt.ask(
-                "Optimizer?",
-                choices=[
-                    "adamw",
-                    "adamw_8bit",
-                    "adamw_4bit",
-                    "adam",
-                    "adan",
-                    "sophia",
-                    "adalomo",
-                    "lomo",
-                    "adamw_apex",
-                    "came",
+    save_small_model(ckpt, model_path.name, 0, hps, input)
+
+
+def _train_index(responses: Dict[str, Any]):
+    model_path = Path("models") / responses["model_name"].name
+    model_path.mkdir(exist_ok=True, parents=True)
+
+    input = InputParameters(
+        dtype=torch.float32,
+        training_files=None,
+        model_files=model_path,
+        used_device=None,
+    )
+    train_index(responses["model_name"], input)
+
+
+def _train_model(responses: Dict[str, Any]):
+    output_dir = Path("train_logs") / responses["model_name"]
+    input = InputParameters(
+        training_files=Path(responses["input"]),
+        model_files=output_dir,
+        used_device=torch.device(responses["device"]),
+        dtype=responses["dtype"],
+        batch_size=responses["batch_size"],
+        log_interval=responses["log_interval"],
+        save_every=responses["save_every"],
+        latest_only=responses["latest_only"],
+        cache_data=responses["cache_data"],
+        optimizer=responses["optimizer"],
+        scheduler=responses["scheduler"],
+        pretrain_d=responses["pretrain_d"],
+        pretrain_g=responses["pretrain_g"],
+        epochs=responses["epochs"],
+        seed=responses["seed"],
+    )
+    hyperparameters = TrainingParameters()
+
+    with progress_bar as progress:
+        (output_dir / gt).mkdir(exist_ok=True, parents=True)
+        if len(os.listdir(output_dir / gt)) == 0:
+            preprocess(input.training_files, output_dir, progress)
+
+        (output_dir / f0).mkdir(exist_ok=True)
+        if len(os.listdir(output_dir / f0)) == 0:
+            extract_f0(output_dir, input, progress)
+
+        (output_dir / features).mkdir(exist_ok=True)
+        if len(os.listdir(output_dir / features)) == 0:
+            extract_features(output_dir, input, progress)
+
+        if not (output_dir / "filelist.txt").exists():
+            write_filelist(output_dir, input)
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    if input.used_device.type == "cuda":
+        if input.dtype == "bfloat16":
+            torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
+        elif input.dtype == "float16":
+            torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True
+        else:
+            torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = (
+            True  # may increase VRam usage... TODO: debug later?
+        )
+        torch.backends.cudnn.benchmark_limit = 0  # try everything!!
+
+    run(0, 1, input, hyperparameters)
+
+
+prompts = [
+    {
+        "type": "multiprompt",
+        "prompt": "Do you want to extract a model or train a new one?",
+        "default": "train",
+        "options": [
+            {
+                "name": "extract",
+                "questions": [
+                    {
+                        "type": "multiprompt",
+                        "name": "model_name",
+                        "prompt": "Model name?",
+                        "default": 0,
+                        "choices": FileChoice("train_logs"),
+                    },
+                    {
+                        "type": "multiprompt",
+                        "name": "dtype",
+                        "prompt": "What dtype should it be saved in?",
+                        "default": -1,
+                        "choices": DtypeChoice(),
+                    },
                 ],
-                default="adan",
-            )
-            hyperparameters.train.scheduler = Prompt.ask(
-                "Scheduler?",
-                choices=["exponential", "constant", "cosine"],
-                default="exponential",
-            )
+                "handle": _extract_model,
+            },
+            {
+                "name": "index",
+                "questions": [
+                    {
+                        "type": "multiprompt",
+                        "name": "model_name",
+                        "prompt": "Model name?",
+                        "default": 0,
+                        "choices": FileChoice("train_logs"),
+                    },
+                ],
+                "handle": _train_index,
+            },
+            {
+                "name": "train",
+                "questions": [
+                    {
+                        "type": "multiprompt",
+                        "name": "device",
+                        "prompt": "Which device do you want to use?",
+                        "default": 0,
+                        "choices": DeviceChoice(),
+                    },
+                    {
+                        "type": "multiprompt",
+                        "name": "dtype",
+                        "prompt": "Which device do you want to use?",
+                        "default": -1,
+                        "choices": DtypeChoice(),
+                    },
+                    {
+                        "type": "prompt",
+                        "name": "input",
+                        "prompt": "Input audio?",
+                        "default": "./audio_input/",
+                    },
+                    {
+                        "type": "prompt",
+                        "name": "model_name",
+                        "prompt": "Model name?",
+                        "default": "rvc_model",
+                    },
+                    {
+                        "type": "iprompt",
+                        "name": "batch_size",
+                        "prompt": "Batch size?",
+                        "default": 12,
+                    },
+                    {
+                        "type": "fprompt",
+                        "name": "learning_rate",
+                        "prompt": "Learning rate?",
+                        "default": 2e-4,
+                    },
+                    {
+                        "type": "iprompt",
+                        "name": "epochs",
+                        "prompt": "Number of epochs?",
+                        "default": 1000,
+                    },
+                    {
+                        "type": "iprompt",
+                        "name": "log_interval",
+                        "prompt": "Log interval?",
+                        "default": 5,
+                    },
+                    {
+                        "type": "iprompt",
+                        "name": "save_every",
+                        "prompt": "Save interval?",
+                        "default": 100,
+                    },
+                    {
+                        "type": "confirm",
+                        "name": "latest_only",
+                        "prompt": "Save only the latest model?",
+                        "default": False,
+                    },
+                    {
+                        "type": "confirm",
+                        "name": "cache_data",
+                        "prompt": "Cache all data to GPU memory?",
+                        "default": True,
+                    },
+                    {
+                        "type": "iprompt",
+                        "name": "seed",
+                        "prompt": "Seed?",
+                        "default": 1337,
+                    },
+                    {
+                        "type": "multiprompt",
+                        "name": "optimizer",
+                        "prompt": "Optimizer?",
+                        "default": 0,
+                        "choices": OptimizerChoice(),
+                    },
+                    {
+                        "type": "multiprompt",
+                        "name": "scheduler",
+                        "prompt": "Scheduler?",
+                        "default": "constant",
+                        "choices": ["exponential", "constant", "cosine"],
+                    },
+                    {
+                        "type": "multiprompt",
+                        "name": "pretrain_g",
+                        "prompt": "Pretrain G?",
+                        "default": 0,
+                        "choices": FileChoice("weights", "g_"),
+                        "if": ">1",
+                    },
+                    {
+                        "type": "multiprompt",
+                        "name": "pretrain_d",
+                        "prompt": "Pretrain D?",
+                        "default": 0,
+                        "choices": FileChoice("weights", "d_"),
+                        "if": ">1",
+                    },
+                ],
+                "handle": _train_model,
+            },
+        ],
+    }
+]
 
-            input.pretrain_d = Path("weights/") / Prompt.ask(
-                "Pretrained D?", choices=D_list, default=D_list[0]
-            )
-            input.pretrain_g = Path("weights/") / Prompt.ask(
-                "Pretrained G?", choices=G_list, default=G_list[0]
-            )
 
-            with progress_bar as progress:
-                (output_dir / gt).mkdir(exist_ok=True, parents=True)
-                if len(os.listdir(output_dir / gt)) == 0:
-                    preprocess(input.training_files, output_dir, progress)
+if __name__ == "__main__":
+    while True:
+        typemap = {
+            "multiprompt": Question.ask,
+            "prompt": rp.Prompt.ask,
+            "confirm": rp.Confirm.ask,
+            "fprompt": rp.FloatPrompt.ask,
+            "iprompt": rp.IntPrompt.ask,
+        }
 
-                (output_dir / f0).mkdir(exist_ok=True)
-                if len(os.listdir(output_dir / f0)) == 0:
-                    extract_f0(output_dir, input, hyperparameters, progress)
+        def get_choices(choices):
+            return [x["name"] for x in choices]
 
-                (output_dir / features).mkdir(exist_ok=True)
-                if len(os.listdir(output_dir / features)) == 0:
-                    extract_features(output_dir, input, hyperparameters, progress)
-
-                if not (output_dir / "filelist.txt").exists():
-                    write_filelist(output_dir, input)
-
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            run(0, 1, input, hyperparameters)
+        menu = prompts[0]
+        current = 0
+        responses = {
+            "device": "cpu",
+            "dtype": torch.float32,
+        }
+        logger.info("Entering interactive mode.")
+        t = typemap[menu["type"]](
+            menu["prompt"],
+            choices=get_choices(menu["options"]),
+            default=menu["default"],
+        )
+        t = [x for x in menu["options"] if x["name"] == t][0]
+        while current != len(t["questions"]):
+            try:
+                q = t["questions"][current]
+                _type = typemap[q["type"]]
+                do = True
+                _choices = q.get("choices", None)
+                if _choices is not None:
+                    if isinstance(_choices, list):
+                        _choices = [(x, x) for x in _choices]
+                    else:
+                        _choices = _choices(responses["device"], responses["dtype"])
+                    if "if" in q:
+                        i = q["if"]
+                        if i[0] == ">":
+                            if len(_choices) > int(i[1:]):
+                                _default = q.get("default", -1)
+                                if isinstance(_default, int):
+                                    _default = _choices[_default]
+                                responses[q["name"]] = _choices[0][_default]
+                                do = False
+                        elif i[0] == "<":
+                            if len(_choices) < int(i[1:]):
+                                _default = q.get("default", -1)
+                                if isinstance(_default, int):
+                                    _default = _choices[_default]
+                                responses[q["name"]] = _choices[0][_default]
+                                do = False
+                if do:
+                    if (_default := q.get("default", None)) is not None:
+                        if isinstance(_default, int) and _choices is not None:
+                            _default = _choices[_default][0]
+                    if _choices is not None:
+                        resp = _type(
+                            q["prompt"],
+                            choices=[x[0] for x in _choices],
+                            default=_default,
+                        )
+                        resp = [x for x in _choices if x[0] == resp][0][1]
+                    else:
+                        resp = _type(q["prompt"], default=_default)
+                    responses[q["name"]] = resp
+                current += 1
+            except KeyboardInterrupt:
+                current -= 1
+                if current < 0:
+                    break
+        if current == len(t["questions"]):
+            t["handle"](responses)
