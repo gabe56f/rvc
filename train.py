@@ -177,6 +177,7 @@ class TrainingParameters:
     train = TrainParameters()
     data = DataParameters()
     model = ModelParameters()
+    version: str = "v2"
 
 
 @dataclass
@@ -1104,34 +1105,39 @@ def run(
     train_logger = setup_logging(input, hyperparameters)
 
     cache = []
-    with progress_bar as progress:
-        task = progress.add_task("Training...", total=input.epochs + 1)
-        progress.update(task, advance=epoch_str)
+    try:
+        with progress_bar as progress:
+            task = progress.add_task("Training...", total=input.epochs + 1)
+            progress.update(task, advance=epoch_str)
 
-        for epoch in progress.track(range(epoch_str, input.epochs + 1), task_id=task):
-            train_and_evaluate(
-                epoch,
-                dtype,
-                hyperparameters,
-                input,
-                [net_g, net_d],
-                sec_nets,
-                [
-                    (optimizer_g, functools.partial(step, optimizer_g)),
-                    (optimizer_d, functools.partial(step, optimizer_d)),
-                ],
-                scaler,
-                [train_loader, None],
-                train_logger,
-                cache,
-            )
+            for epoch in progress.track(
+                range(epoch_str, input.epochs + 1), task_id=task
+            ):
+                train_and_evaluate(
+                    epoch,
+                    dtype,
+                    hyperparameters,
+                    input,
+                    [net_g, net_d],
+                    sec_nets,
+                    [
+                        (optimizer_g, functools.partial(step, optimizer_g)),
+                        (optimizer_d, functools.partial(step, optimizer_d)),
+                    ],
+                    scaler,
+                    [train_loader, None],
+                    train_logger,
+                    cache,
+                )
 
-            if sec_lr[0] is not None and input.secondary_start >= epoch:
-                sec_lr[0].step()
-                sec_lr[1].step()
-            else:
-                scheduler_g.step()
-                scheduler_d.step()
+                if sec_lr[0] is not None and input.secondary_start >= epoch:
+                    sec_lr[0].step()
+                    sec_lr[1].step()
+                else:
+                    scheduler_g.step()
+                    scheduler_d.step()
+    except KeyboardInterrupt:
+        logger.info("Interrupted, saving model.")
 
     if input.secondary_model != "none":
         S.update_bn(train_loader, sec_nets[0], device=input.used_device)
@@ -1550,6 +1556,10 @@ def _train_index(responses: Dict[str, Any]):
 
 def _train_model(responses: Dict[str, Any]):
     output_dir = Path("train_logs") / responses["model_name"]
+    print(responses["config"])
+    hyperparameters = TrainingParameters.from_json(
+        Path(responses["config"]).read_text("utf-8")
+    )
     input = InputParameters(
         training_files=Path(responses["input"]),
         model_files=output_dir,
@@ -1566,8 +1576,8 @@ def _train_model(responses: Dict[str, Any]):
         pretrain_g=responses["pretrain_g"],
         epochs=responses["epochs"],
         seed=responses["seed"],
+        version=hyperparameters.version,
     )
-    hyperparameters = TrainingParameters()
 
     with progress_bar as progress:
         (output_dir / gt).mkdir(exist_ok=True, parents=True)
@@ -1645,6 +1655,13 @@ prompts = [
             {
                 "name": "train",
                 "questions": [
+                    {
+                        "type": "multiprompt",
+                        "name": "config",
+                        "prompt": "Which configuration do you want to use?",
+                        "default": "40k_v2.json",
+                        "choices": FileChoice("configs"),
+                    },
                     {
                         "type": "multiprompt",
                         "name": "device",
