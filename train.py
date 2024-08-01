@@ -204,7 +204,7 @@ class InputParameters:
 
     secondary_model: Literal["none", "swa", "ema"] = "none"
     secondary_start: int = -1  # -1 to disable
-    swa_lr = 5e-4
+    swa_lr: float = 5e-4
     ema_delta: float = 0.995  # default: 0.995
 
     log_interval: int = 5
