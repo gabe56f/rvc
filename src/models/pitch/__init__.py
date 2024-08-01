@@ -44,6 +44,19 @@ def _get_pitch_extractors(rvc_config: "RVCConfig"):
     return _pitch_extractors
 
 
+def _preprocess(audio: np.ndarray, sr: int, config: "RVCConfig", skip: bool = False):
+    if skip:
+        audio_out = audio.copy()
+    else:
+        t_pad = sr * config.x_pad
+        audio = signal.filtfilt(_bh, _ah, audio)
+        audio = librosa.to_mono(audio)
+        audio_out = audio.copy()
+        audio = np.pad(audio, (t_pad, t_pad), mode="reflect")
+    audio = torch.from_numpy(audio).to(config.device, config.dtype)
+    return audio, audio_out
+
+
 def compute_pitch_from_audio(
     audio: np.ndarray,
     transposition: int = 0,
@@ -75,16 +88,20 @@ def compute_pitch_from_audio(
         raise ValueError("No valid pitch extractor found")
     # print(f"Using extractors: {extractors}")
 
-    if skip_preprocess:
-        audio_out = audio.copy()
-        audio = torch.from_numpy(audio).to(rvc_config.device, rvc_config.dtype)
+    multiple = isinstance(audio, list)
+    if multiple:
+        audio_list = []
+        audio_out_list = []
+
+        for a in audio:
+            au, au_o = _preprocess(a, sr, rvc_config, skip_preprocess)
+            audio_list.append(au)
+            audio_out_list.append(au_o)
+
+        audio = torch.concatenate(audio_list, dim=0)
+        audio_out = np.concatenate(audio_out_list, axis=0)
     else:
-        t_pad = sr * rvc_config.x_pad
-        audio = signal.filtfilt(_bh, _ah, audio)
-        audio = librosa.to_mono(audio)
-        audio_out = audio.copy()
-        audio_pad = np.pad(audio, (t_pad, t_pad), mode="reflect")
-        audio = torch.from_numpy(audio_pad).to(rvc_config.device, rvc_config.dtype)
+        audio, audio_out = _preprocess(audio, sr, rvc_config, skip_preprocess)
     pred_len = audio.shape[0] // hop_length
     f0_min = 50
     f0_max = 1100
@@ -120,6 +137,8 @@ def compute_pitch_from_audio(
     f0_mel[f0_mel <= 1] = 1
     f0_mel[f0_mel > 255] = 255
     pitch = torch.round(f0_mel).to(torch.long)
+    if multiple:
+        return ((pitch, pitchf), audio_out)
     return ((pitch.unsqueeze(0), pitchf.unsqueeze(0)), audio_out)
 
 

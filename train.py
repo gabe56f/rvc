@@ -2,7 +2,7 @@ from src.logger import progress_bar, Question
 
 import logging
 from collections import OrderedDict
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, asdict
 import functools
 from typing import (
     Any,
@@ -89,6 +89,7 @@ f0 = "f0/"
 f0coarse = "f0nsf/"
 
 hubert = "hubert_base.pt"
+hubert_batch = 4
 assert Path(
     hubert
 ).exists(), "Please download the pretrained Hubert model from Hugging Face"
@@ -97,6 +98,8 @@ hubert, saved_cfg, task = load_hubert(hubert, None, return_cfg=True)
 simplefilter("ignore")
 
 global_step = 0
+optimal_cores: int = math.ceil(os.cpu_count() / 3)
+noise_batch = 8  # batch size for pitch extraction
 
 if USE_WANDB:
     import wandb
@@ -125,58 +128,56 @@ OptimizerType = Union[
 @dataclass_json(undefined=Undefined.EXCLUDE)
 @dataclass
 class TrainParameters:
-    betas: List[float] = field(default_factory=lambda: [0.8, 0.99])
-    eps: float = 1e-9
-    lr_decay: float = 0.999875
-    segment_size: int = 12800
-    init_lr_ratio: float = 1
-    warmup_epochs: int = 0
-    c_mel: int = 45
-    c_kl: float = 1.0
+    betas: List[float]
+    eps: float
+    lr_decay: float
+    segment_size: int
+    init_lr_ratio: float
+    warmup_epochs: int
+    c_mel: int
+    c_kl: float
 
 
 @dataclass_json
 @dataclass
 class DataParameters:
-    max_wav_value: float = 32768
-    sampling_rate: int = 40000
-    filter_length: int = 2048
-    hop_length: int = 400
-    win_length: int = 2048
-    n_mel_channels: int = 125
-    mel_fmin: float = 0.0
-    mel_fmax: Optional[float] = None
+    max_wav_value: float
+    sampling_rate: int
+    filter_length: int
+    hop_length: int
+    win_length: int
+    n_mel_channels: int
+    mel_fmin: float
+    mel_fmax: Optional[float]
 
 
 @dataclass_json
 @dataclass
 class ModelParameters:
-    inter_channels: int = 192
-    hidden_channels: int = 192
-    filter_channels: int = 768
-    n_heads: int = 2
-    n_layers: int = 6
-    kernel_size: int = 3
-    p_dropout: int = 0
-    resblock: str = "1"
-    resblock_kernel_sizes: List[int] = field(default_factory=lambda: [3, 7, 11])
-    resblock_dilation_sizes: List[List[int]] = field(
-        default_factory=lambda: [[1, 3, 5], [1, 3, 5], [1, 3, 5]]
-    )
-    upsample_rates: List[int] = field(default_factory=lambda: [10, 10, 2, 2])
-    upsample_initial_channel: int = 512
-    upsample_kernel_sizes: List[int] = field(default_factory=lambda: [16, 16, 4, 4])
-    use_spectral_norm: bool = False
-    gin_channels: int = 256
-    spk_embed_dim: int = 109
+    inter_channels: int
+    hidden_channels: int
+    filter_channels: int
+    n_heads: int
+    n_layers: int
+    kernel_size: int
+    p_dropout: int
+    resblock: str
+    resblock_kernel_sizes: List[int]
+    resblock_dilation_sizes: List[List[int]]
+    upsample_rates: List[int]
+    upsample_initial_channel: int
+    upsample_kernel_sizes: List[int]
+    use_spectral_norm: bool
+    gin_channels: int
+    spk_embed_dim: int
 
 
 @dataclass_json
 @dataclass
 class TrainingParameters:
-    train = TrainParameters()
-    data = DataParameters()
-    model = ModelParameters()
+    train: TrainParameters
+    data: DataParameters
+    model: ModelParameters
     version: str = "v2"
 
 
@@ -192,20 +193,14 @@ class InputParameters:
     save_every: int = 200
     latest_only: bool = False
 
-    pitch_extractor: str = "rmvpe"  # TODO: expose to user
+    pitch_extractor: str = "rmvpe"
 
     pretrain_g: str = ""
     pretrain_d: str = ""
     version: str = "v2"
-    sampling_rate: Literal["32k", "40k", "48k"] = (
-        "40k"  # TODO: implement config loading
-    )
 
     batch_size: int = 36
     gradient_accumulation_steps: int = 1
-    dataloader_workers: int = (
-        4  # TODO: adjust this according to available cores. dw=max(int(cores/3), 1)
-    )
 
     secondary_model: Literal["none", "swa", "ema"] = "none"
     secondary_start: int = -1  # -1 to disable
@@ -216,9 +211,10 @@ class InputParameters:
     seed: int = 1337
     epochs: int = 1000
     learning_rate: float = 2e-4
+    clip_grad: float = 0
 
     optimizer: OptimizerList = "adamw"
-    compile_optimizer: bool = False  # should net a decent speedup TODO: expose
+    compile_optimizer: bool = False  # should net a decent speedup
     scheduler: Literal["exponential", "constant", "cosine"] = "constant"
 
     def get_rvc_config(self) -> RVCConfig:
@@ -421,7 +417,7 @@ def train_index(output_dir: Path, input_parameters: InputParameters):
             MiniBatchKMeans(
                 n_clusters=10000,
                 verbose=True,
-                batch_size=256 * 1,
+                batch_size=256 * optimal_cores,
                 compute_labels=False,
                 init="random",
             )
@@ -489,6 +485,7 @@ def preprocess(
             logger.debug(f"{idx0}-{idx1} is filtered")
             return
         tmp_audio = (tmp_audio / tmp_max * (max * alpha)) + (1 - alpha) * tmp_audio
+        # the line below WILL/SHOULD stay here, since I've spent ~3h looking why half the audio was cut off
         # tmp_audio = ((tmp_audio / tmp_max * (max * alpha)) + (1 - alpha)) * tmp_audio
         wavfile.write(gt_wavs / f"{idx0}-{idx1}.wav", sr, tmp_audio.float().numpy())
         tmp_audio = Fa.resample(tmp_audio, sr, 16000)
@@ -789,7 +786,13 @@ def choose_optimizer(
 
 
 def choose_scheduler(
-    sched: Literal["exponential", "constant", "cosine", "swa"],
+    sched: Literal[
+        "exponential",
+        "constant",
+        "cosine",
+        "cosine_annealing_with_warm_restarts",
+        "swa",
+    ],
     optimizer: torch.optim.Optimizer,
     gamma: float,
     last_epoch: int,
@@ -805,7 +808,15 @@ def choose_scheduler(
         )
     elif sched == "cosine":
         return torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer=optimizer, T_max=max_epochs, last_epoch=last_epoch
+            optimizer=optimizer, T_max=max_epochs, eta_min=1e-10, last_epoch=last_epoch
+        )
+    elif sched == "cosine_annealing_with_warm_restarts":
+        return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer=optimizer,
+            T_0=max_epochs // 20,
+            T_mult=2,
+            eta_min=1e-10,
+            last_epoch=last_epoch,
         )
     elif sched == "swa":
         return S.SWALR(optimizer=optimizer, swa_lr=gamma)
@@ -858,7 +869,7 @@ def save_small_model(
         hps.data.sampling_rate,
     ]
     opt["info"] = f"{epoch}epoch"
-    opt["sr"] = int(input_parameters.sampling_rate.replace("k", "")) * 1000
+    opt["sr"] = hps.data.sampling_rate
     opt["f0"] = 1
     opt["version"] = input_parameters.version
     (Path("models/") / name).mkdir(exist_ok=True, parents=True)
@@ -900,7 +911,7 @@ def run(
     collate_fn = TextAudioCollateMultiNSFsid()
     train_loader = DataLoader(
         train_dataset,
-        num_workers=input.dataloader_workers,
+        num_workers=optimal_cores,
         shuffle=False,
         pin_memory=True,
         collate_fn=collate_fn,
@@ -933,12 +944,19 @@ def run(
     ):
         nonlocal needs_unscale
 
+        if input.gradient_accumulation_steps == 1:
+            opt.zero_grad()
+
         lr = opt.param_groups[0]["lr"]
         if scaler is not None and needs_unscale:
             scaler.scale(loss).backward()
             if accumulated:
                 try:
                     scaler.unscale_(opt)
+                    if input.clip_grad > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            net.parameters(), input.clip_grad, foreach=True
+                        )
                     scaler.step(opt)
                     if last:
                         scaler.update()
@@ -957,7 +975,13 @@ def run(
             else:
                 loss.backward()
                 if accumulated:
+                    if input.clip_grad > 0:
+                        torch.nn.utils.clip_grad_norm_(
+                            net.parameters(), input.clip_grad, foreach=True
+                        )
                     opt.step()
+                    if input.gradient_accumulation_steps != 1:
+                        opt.zero_grad()
 
         if ema is not None and accumulated and epoch >= input.secondary_start:
             ema.update_parameters(net)
@@ -969,9 +993,7 @@ def run(
         logger.info(f"Constructing {input.secondary_model.upper()} models.")
 
         # All this, just to avoid deepcopy...
-        def create_avg_model(
-            constr, device, avg_fn=None, multi_avg_fn=None
-        ) -> S.AveragedModel:
+        def create_avg_model(constr, device, multi_avg_fn=None) -> S.AveragedModel:
             net: S.AveragedModel = S.AveragedModel.__new__(S.AveragedModel)
             torch.nn.Module.__init__(net)
             net.module = constr().to(device, dtype)
@@ -979,48 +1001,33 @@ def run(
                 "n_averaged", torch.tensor(0, dtype=torch.long, device=device)
             )
             net.avg_fn = None
-            net.avg_fn = avg_fn
             net.multi_avg_fn = multi_avg_fn
             net.use_buffers = True
             return net
 
-        if input.secondary_model == "ema":
-            sec_nets[0] = create_avg_model(
-                G,
-                input.used_device,
-                multi_avg_fn=S.get_ema_multi_avg_fn(input.ema_delta),
-            )
-            sec_nets[1] = create_avg_model(
-                D,
-                input.used_device,
-                multi_avg_fn=S.get_ema_multi_avg_fn(input.ema_delta),
-            )
-            logger.info(
-                f"Using EMA with a={input.ema_delta}, expect increased training time and slightly increased memory usage."
-            )
-        elif input.secondary_model == "swa":
-            sec_nets[0] = create_avg_model(
-                lambda: G(
-                    hyperparameters.data.filter_length // 2 + 1,
-                    hyperparameters.train.segment_size
-                    // hyperparameters.data.hop_length,
-                    sr=hyperparameters.data.sampling_rate,
-                    **asdict(hyperparameters.model),
-                ),
-                input.used_device,
-                multi_avg_fn=S.get_swa_multi_avg_fn(),
-            )
-            sec_nets[1] = create_avg_model(
-                lambda: D(hyperparameters.model.use_spectral_norm),
-                input.used_device,
-                multi_avg_fn=S.get_swa_multi_avg_fn(),
-            )
-
+        avg_fn = S.get_ema_multi_avg_fn(input.ema_delta)
+        if input.secondary_model == "swa":
+            avg_fn = S.get_swa_multi_avg_fn()
             sec_lr[0] = choose_scheduler("swa", optimizer_g, input.swa_lr, -1, -1)
             sec_lr[1] = choose_scheduler("swa", optimizer_d, input.swa_lr, -1, -1)
             logger.info(
                 f"Using SWA with lr={input.swa_lr}, expect increased training time and slightly increased memory usage."
             )
+        else:
+            logger.info(
+                f"Using EMA with a={input.ema_delta}, expect increased training time and slightly increased memory usage."
+            )
+
+        sec_nets[0] = create_avg_model(
+            G,
+            input.used_device,
+            multi_avg_fn=avg_fn,
+        )
+        sec_nets[1] = create_avg_model(
+            D,
+            input.used_device,
+            multi_avg_fn=avg_fn,
+        )
 
     if input.used_device.type == "cuda" and torch.cuda.is_available():
         net_g = DDP(net_g, device_ids=[rank])
@@ -1530,7 +1537,6 @@ def _extract_model(responses: Dict[str, Any]):
     ckpt = torch.load(
         latest_checkpoint_path(responses["model_name"], "G_*.pth"), map_location="cpu"
     )["model"]
-    hps = TrainingParameters()
     input = InputParameters(
         training_files=None,
         model_files=model_path,
@@ -1538,26 +1544,37 @@ def _extract_model(responses: Dict[str, Any]):
         dtype=responses["dtype"],
     )
 
-    save_small_model(ckpt, model_path.name, 0, hps, input)
+    save_small_model(
+        ckpt,
+        model_path.name,
+        0,
+        TrainingParameters.from_json(
+            (responses["model_name"] / "config.json").read_text()
+        ),
+        input,
+    )
 
 
 def _train_index(responses: Dict[str, Any]):
     model_path = Path("models") / responses["model_name"].name
     model_path.mkdir(exist_ok=True, parents=True)
 
+    hyperparameters: TrainingParameters = TrainingParameters.from_json(
+        (responses["model_name"] / "config.json").read_text()
+    )
     input = InputParameters(
         dtype=torch.float32,
         training_files=None,
         model_files=model_path,
         used_device=None,
+        version=hyperparameters.version,
     )
     train_index(responses["model_name"], input)
 
 
 def _train_model(responses: Dict[str, Any]):
     output_dir = Path("train_logs") / responses["model_name"]
-    print(responses["config"])
-    hyperparameters = TrainingParameters.from_json(
+    hyperparameters: TrainingParameters = TrainingParameters.from_json(
         Path(responses["config"]).read_text("utf-8")
     )
     input = InputParameters(
@@ -1566,6 +1583,7 @@ def _train_model(responses: Dict[str, Any]):
         used_device=torch.device(responses["device"]),
         dtype=responses["dtype"],
         batch_size=responses["batch_size"],
+        gradient_accumulation_steps=responses["gradient_accumulation_steps"],
         log_interval=responses["log_interval"],
         save_every=responses["save_every"],
         latest_only=responses["latest_only"],
@@ -1576,13 +1594,24 @@ def _train_model(responses: Dict[str, Any]):
         pretrain_g=responses["pretrain_g"],
         epochs=responses["epochs"],
         seed=responses["seed"],
+        compile_optimizer=responses["compile_optimizer"],
+        pitch_extractor=responses["pitch_extractor"],
+        secondary_model=responses["secondary_model"],
+        secondary_start=responses["secondary_start"],
+        swa_lr=responses["swa_lr"],
+        ema_delta=responses["ema_delta"],
         version=hyperparameters.version,
     )
 
     with progress_bar as progress:
         (output_dir / gt).mkdir(exist_ok=True, parents=True)
         if len(os.listdir(output_dir / gt)) == 0:
-            preprocess(input.training_files, output_dir, progress)
+            preprocess(
+                input.training_files,
+                output_dir,
+                progress,
+                sr=hyperparameters.data.sampling_rate,
+            )
 
         (output_dir / f0).mkdir(exist_ok=True)
         if len(os.listdir(output_dir / f0)) == 0:
@@ -1594,6 +1623,9 @@ def _train_model(responses: Dict[str, Any]):
 
         if not (output_dir / "filelist.txt").exists():
             write_filelist(output_dir, input)
+
+        if not (output_dir / "config.json").exists():
+            (output_dir / "config.json").write_text(hyperparameters.to_json(), "utf-8")
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -1683,6 +1715,19 @@ prompts = [
                         "default": "./audio_input/",
                     },
                     {
+                        "type": "multiprompt",
+                        "name": "pitch_extractor",
+                        "prompt": "Pitch extractor?",
+                        "default": "rmvpe",
+                        "choices": ["rmvpe", "fcpe", "harvest", "dio", "crepe"],
+                    },
+                    {
+                        "type": "fprompt",
+                        "name": "clip_grad",
+                        "prompt": "Maximum gradient value? (Useful to prevent exploding gradients)",
+                        "default": 0.0,
+                    },
+                    {
                         "type": "prompt",
                         "name": "model_name",
                         "prompt": "Model name?",
@@ -1693,6 +1738,12 @@ prompts = [
                         "name": "batch_size",
                         "prompt": "Batch size?",
                         "default": 12,
+                    },
+                    {
+                        "type": "iprompt",
+                        "name": "gradient_accumulation_steps",
+                        "prompt": "Gradient accumulation steps? (How often to update gradients, useful for 'simulating' higher batch size)",
+                        "default": 1,
                     },
                     {
                         "type": "fprompt",
@@ -1748,7 +1799,19 @@ prompts = [
                         "name": "scheduler",
                         "prompt": "Scheduler?",
                         "default": "constant",
-                        "choices": ["exponential", "constant", "cosine"],
+                        "choices": [
+                            "exponential",
+                            "constant",
+                            "cosine",
+                            "cosine_annealing_with_warm_restarts",
+                        ],
+                    },
+                    {
+                        "type": "confirm",
+                        "name": "compile_optimizer",
+                        "prompt": "Compile optimizer?",
+                        "default": False,
+                        "if": "scheduler==constant",
                     },
                     {
                         "type": "multiprompt",
@@ -1765,6 +1828,34 @@ prompts = [
                         "default": 0,
                         "choices": FileChoice("weights", "d_"),
                         "if": ">1",
+                    },
+                    {
+                        "type": "multiprompt",
+                        "name": "secondary_model",
+                        "prompt": "Secondary model?\nSecondary models are alternative models, that are trained on a rolling average of the weights of the main model.\n- SWA kicks in at a specified epoch.\n- EMA 'forgets' and learns based on the provided delta.",
+                        "default": "none",
+                        "choices": ["none", "swa", "ema"],
+                    },
+                    {
+                        "type": "iprompt",
+                        "name": "secondary_start",
+                        "prompt": "Secondary start? (-1 to disable)",
+                        "default": -1,
+                        "if": "secondary_model==swa",
+                    },
+                    {
+                        "type": "fprompt",
+                        "name": "swa_lr",
+                        "prompt": "SWA Learning rate?",
+                        "default": 1e-4,
+                        "if": "secondary_model==swa",
+                    },
+                    {
+                        "type": "fprompt",
+                        "name": "ema_delta",
+                        "prompt": "EMA Delta?",
+                        "default": 0.995,
+                        "if": "secondary_model==ema",
                     },
                 ],
                 "handle": _train_model,
@@ -1813,20 +1904,40 @@ if __name__ == "__main__":
                         _choices = _choices(responses["device"], responses["dtype"])
                     if "if" in q:
                         i = q["if"]
-                        if i[0] == ">":
-                            if len(_choices) > int(i[1:]):
+                        if "==" in i:
+                            k, v = i.split("==")
+                            if responses.get(k, None) != v:
                                 _default = q.get("default", -1)
                                 if isinstance(_default, int):
                                     _default = _choices[_default]
-                                responses[q["name"]] = _choices[0][_default]
+                                    responses[q["name"]] = _choices[_default][0]
+                                else:
+                                    responses[q["name"]] = _default
                                 do = False
-                        elif i[0] == "<":
+                        elif i[0] == ">":
                             if len(_choices) < int(i[1:]):
                                 _default = q.get("default", -1)
                                 if isinstance(_default, int):
                                     _default = _choices[_default]
-                                responses[q["name"]] = _choices[0][_default]
+                                    responses[q["name"]] = _choices[_default][0]
+                                else:
+                                    responses[q["name"]] = _default
                                 do = False
+                        elif i[0] == "<":
+                            if len(_choices) > int(i[1:]):
+                                _default = q.get("default", -1)
+                                if isinstance(_default, int):
+                                    _default = _choices[_default]
+                                responses[q["name"]] = _choices[_default][0]
+                                do = False
+                elif "if" in q:
+                    i = q["if"]
+                    if "==" in i:
+                        k, v = i.split("==")
+                        if responses.get(k, None) != v:
+                            responses[q["name"]] = q["default"]
+                            do = False
+
                 if do:
                     if (_default := q.get("default", None)) is not None:
                         if isinstance(_default, int) and _choices is not None:
@@ -1844,6 +1955,7 @@ if __name__ == "__main__":
                 current += 1
             except KeyboardInterrupt:
                 current -= 1
+                print("")  # new line.
                 if current < 0:
                     break
         if current == len(t["questions"]):
